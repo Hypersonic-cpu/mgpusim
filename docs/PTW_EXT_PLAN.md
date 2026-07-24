@@ -1476,7 +1476,7 @@ Update rules:
   - No timing translation through flat `PageTable.Find`.
   - Commit(s): `<pending>`
 
-- [ ] **6. Test GMMU, three-level PWC behavior, and PTW triggering.**
+- [x] **6. Test GMMU, three-level PWC behavior, and PTW triggering.**
   - Cold four-level walk performs four memory reads.
   - Intermediate PWC hits reduce remaining reads correctly.
   - Final-level PTE access occurs after intermediate traversal.

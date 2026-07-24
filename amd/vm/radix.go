@@ -195,6 +195,18 @@ func (t *RadixPageTable) AddressSpace(pid akitavm.PID) (AddressSpace, bool) {
 	return addressSpace, ok
 }
 
+// MappingMetadata returns non-address leaf attributes retained for response
+// compatibility. The physical translation itself must come from Walk.
+func (t *RadixPageTable) MappingMetadata(
+	pid akitavm.PID,
+	vAddr uint64,
+) (akitavm.Page, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	page, ok := t.pageMetadata[pid][t.pageBase(vAddr)]
+	return page, ok
+}
+
 // Walk performs an authoritative physical-memory radix traversal.
 func (t *RadixPageTable) Walk(pid akitavm.PID, vAddr uint64) (WalkResult, error) {
 	t.mu.RLock()

@@ -1,0 +1,379 @@
+package gmmu
+
+import (
+	"encoding/binary"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/sarchlab/akita/v5/mem"
+	akitavm "github.com/sarchlab/akita/v5/mem/vm"
+	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
+)
+
+func makeCore(
+	t *testing.T,
+	format mgpuvm.PageTableFormat,
+	configure func(*Config),
+) (*Core, *mgpuvm.RadixPageTable) {
+	t.Helper()
+	storage := mem.NewStorageWithUnitSize(0x4000_0000, 4096)
+	tableAllocator := mgpuvm.NewLinearTablePageAllocator(0x10_0000, 0x1000_0000)
+	table, err := mgpuvm.NewRadixPageTable(
+		format,
+		tableAllocator,
+		storage,
+		akitavm.NewPageTable(uint64(format.PageOffsetBits)),
+	)
+	if err != nil {
+		t.Fatalf("new radix table: %v", err)
+	}
+	config := DefaultConfig()
+	config.Format = format
+	if configure != nil {
+		configure(&config)
+	}
+	core, err := NewCore(config, table)
+	if err != nil {
+		t.Fatalf("new core: %v", err)
+	}
+	return core, table
+}
+
+func mapPage(table *mgpuvm.RadixPageTable, pid akitavm.PID, vAddr, pAddr uint64) {
+	table.Insert(akitavm.Page{
+		PID:      pid,
+		VAddr:    vAddr,
+		PAddr:    pAddr,
+		PageSize: 4096,
+		Valid:    true,
+		DeviceID: 1,
+	})
+}
+
+func completeReads(t *testing.T, core *Core, reads []MemoryRead) {
+	t.Helper()
+	for _, read := range reads {
+		data, err := core.Table.Storage.Read(read.PAddr, read.ByteSize)
+		if err != nil {
+			t.Fatalf("storage read: %v", err)
+		}
+		if err := core.CompleteMemoryRead(read.ID, data); err != nil {
+			t.Fatalf("complete read %d: %v", read.ID, err)
+		}
+	}
+}
+
+func finishCore(t *testing.T, core *Core) {
+	t.Helper()
+	for {
+		reads := core.DrainMemoryReads()
+		if len(reads) == 0 {
+			if core.IsDrained() {
+				return
+			}
+			t.Fatal("core has work but no memory request")
+		}
+		completeReads(t, core, reads)
+	}
+}
+
+func TestColdFourLevelWalkReadsEveryLevel(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 0x4000, 0x2000_0000)
+
+	if err := core.Submit(WalkRequest{
+		ID: 1, PID: 1, VAddr: 0x4123, DeviceID: 1,
+	}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	finishCore(t, core)
+
+	translations := core.DrainTranslations()
+	if len(translations) != 1 {
+		t.Fatalf("translations: got %d, want 1", len(translations))
+	}
+	if translations[0].Reads != 4 ||
+		translations[0].Page.PAddr != 0x2000_0000 {
+		t.Fatalf("translation: %+v", translations[0])
+	}
+	if core.Stats.MemoryReads != 4 {
+		t.Fatalf("memory reads: got %d, want 4", core.Stats.MemoryReads)
+	}
+}
+
+func TestRepeatedPrefixWalkReadsOnlyLeaf(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 0x4000, 0x2000_0000)
+	mapPage(table, 1, 0x5000, 0x3000_0000)
+
+	if err := core.Submit(WalkRequest{ID: 1, PID: 1, VAddr: 0x4000}); err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	finishCore(t, core)
+	core.DrainTranslations()
+	readsBefore := core.Stats.MemoryReads
+
+	if err := core.Submit(WalkRequest{ID: 2, PID: 1, VAddr: 0x5000}); err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+	finishCore(t, core)
+	translations := core.DrainTranslations()
+
+	if got := core.Stats.MemoryReads - readsBefore; got != 1 {
+		t.Fatalf("second-walk reads: got %d, want 1", got)
+	}
+	if len(translations) != 1 ||
+		translations[0].Page.PAddr != 0x3000_0000 {
+		t.Fatalf("translation: %+v", translations)
+	}
+	for level := 0; level < 3; level++ {
+		if core.Stats.PWCHits[level] != 1 {
+			t.Fatalf("PWC %d hits: got %d, want 1", level, core.Stats.PWCHits[level])
+		}
+	}
+}
+
+func TestLastIntermediatePWCMissRequiresTwoReads(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 0x4000, 0x2000_0000)
+	mapPage(table, 1, 0x5000, 0x3000_0000)
+	if err := core.Submit(WalkRequest{ID: 1, PID: 1, VAddr: 0x4000}); err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	finishCore(t, core)
+	core.DrainTranslations()
+	core.pwcs[2].reset()
+	readsBefore := core.Stats.MemoryReads
+
+	if err := core.Submit(WalkRequest{ID: 2, PID: 1, VAddr: 0x5000}); err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+	finishCore(t, core)
+
+	if got := core.Stats.MemoryReads - readsBefore; got != 2 {
+		t.Fatalf("second-walk reads: got %d, want 2", got)
+	}
+	if core.PWCOccupancy(2) != 1 {
+		t.Fatalf("last PWC occupancy: got %d, want 1", core.PWCOccupancy(2))
+	}
+}
+
+func TestPageWalkCacheUsesDeterministicLRU(t *testing.T) {
+	cache := newPageWalkCache(2)
+	first := pwcKey{PID: 1, Prefix: 1}
+	second := pwcKey{PID: 1, Prefix: 2}
+	third := pwcKey{PID: 1, Prefix: 3}
+	cache.insert(first, pwcValue{ChildTablePAddr: 0x1000})
+	cache.insert(second, pwcValue{ChildTablePAddr: 0x2000})
+	if _, ok := cache.lookup(first); !ok {
+		t.Fatal("first entry missing")
+	}
+	cache.insert(third, pwcValue{ChildTablePAddr: 0x3000})
+
+	if _, ok := cache.lookup(second); ok {
+		t.Fatal("least-recently-used entry was not evicted")
+	}
+	if _, ok := cache.lookup(first); !ok {
+		t.Fatal("recently used entry was evicted")
+	}
+	if _, ok := cache.lookup(third); !ok {
+		t.Fatal("new entry missing")
+	}
+}
+
+func TestPWQAndWalkerPressureAndFCFSDispatch(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 0x4000, 0x2000_0000)
+
+	for id := uint64(1); id <= DefaultNumWalkers+DefaultPWQEntries; id++ {
+		if err := core.Submit(WalkRequest{ID: id, PID: 1, VAddr: 0x4000}); err != nil {
+			t.Fatalf("submit %d: %v", id, err)
+		}
+	}
+	if err := core.Submit(WalkRequest{
+		ID: 999, PID: 1, VAddr: 0x4000,
+	}); !errors.Is(err, ErrPWQFull) {
+		t.Fatalf("overflow submit: got %v", err)
+	}
+	if core.Stats.PeakWalkersBusy != DefaultNumWalkers ||
+		core.Stats.PeakPWQOccupancy != DefaultPWQEntries {
+		t.Fatalf("pressure stats: %+v", core.Stats)
+	}
+
+	for {
+		reads := core.DrainMemoryReads()
+		for _, read := range reads {
+			if read.Walker != 0 {
+				continue
+			}
+			completeReads(t, core, []MemoryRead{read})
+			if core.Walkers[0].Req.ID == DefaultNumWalkers+1 {
+				return
+			}
+		}
+		if len(reads) == 0 {
+			t.Fatal("walker 0 made no progress")
+		}
+	}
+}
+
+func TestFaultsAreStructured(t *testing.T) { //nolint:gocognit,funlen
+	t.Run("missing root", func(t *testing.T) {
+		core, _ := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+		if err := core.Submit(WalkRequest{ID: 1, PID: 99, VAddr: 0x4000}); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+		faults := core.DrainFaults()
+		if len(faults) != 1 ||
+			faults[0].Reason != mgpuvm.ErrAddressSpaceNotFound.Error() {
+			t.Fatalf("faults: %+v", faults)
+		}
+	})
+
+	t.Run("non-present leaf", func(t *testing.T) {
+		core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+		mapPage(table, 1, 0x4000, 0x2000_0000)
+		if err := core.Submit(WalkRequest{ID: 1, PID: 1, VAddr: 0x5000}); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+		finishCore(t, core)
+		faults := core.DrainFaults()
+		if len(faults) != 1 || faults[0].Reason != "non-present entry" {
+			t.Fatalf("faults: %+v", faults)
+		}
+	})
+
+	t.Run("permissions and malformed entry", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			access AccessType
+			value  uint64
+			reason string
+		}{
+			{
+				name:   "write denied",
+				access: AccessWrite,
+				value:  0x2000_0000 | 1 | 4,
+				reason: "permission denied",
+			},
+			{
+				name:   "execute denied",
+				access: AccessExecute,
+				value:  0x2000_0000 | 1 | 2 | 4 | uint64(1)<<63,
+				reason: "permission denied",
+			},
+			{
+				name:   "malformed",
+				access: AccessRead,
+				value:  uint64(1) << 10,
+				reason: mgpuvm.ErrMalformedPTE.Error(),
+			},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+				mapPage(table, 1, 0x4000, 0x2000_0000)
+				walk, err := table.Walk(1, 0x4000)
+				if err != nil {
+					t.Fatalf("locate leaf: %v", err)
+				}
+				data := make([]byte, 8)
+				binary.LittleEndian.PutUint64(data, test.value)
+				if err := table.Storage.Write(walk.EntryPAddrs[3], data); err != nil {
+					t.Fatalf("write leaf: %v", err)
+				}
+				if err := core.Submit(WalkRequest{
+					ID: 1, PID: 1, VAddr: 0x4000, Access: test.access,
+				}); err != nil {
+					t.Fatalf("submit: %v", err)
+				}
+				finishCore(t, core)
+				faults := core.DrainFaults()
+				if len(faults) != 1 {
+					t.Fatalf("faults: %+v", faults)
+				}
+				if test.name == "malformed" {
+					if !strings.Contains(
+						faults[0].Reason, mgpuvm.ErrMalformedPTE.Error()) {
+						t.Fatalf("fault reason: %s", faults[0].Reason)
+					}
+				} else if faults[0].Reason != test.reason {
+					t.Fatalf("fault reason: got %q, want %q", faults[0].Reason, test.reason)
+				}
+			})
+		}
+	})
+}
+
+func TestFourAndFiveLevelWalkersShareImplementation(t *testing.T) {
+	formats := []mgpuvm.PageTableFormat{
+		mgpuvm.X86FourLevel4KFormat(),
+		mgpuvm.X86FiveLevel4KFormat(),
+	}
+	for _, format := range formats {
+		core, table := makeCore(t, format, nil)
+		mapPage(table, 1, 0x1234_5678_9000, 0x2000_0000)
+		if err := core.Submit(WalkRequest{
+			ID: 1, PID: 1, VAddr: 0x1234_5678_9abc,
+		}); err != nil {
+			t.Fatalf("%d-level submit: %v", format.NumLevels, err)
+		}
+		finishCore(t, core)
+		translations := core.DrainTranslations()
+		if len(translations) != 1 ||
+			translations[0].Reads != uint64(format.NumLevels) {
+			t.Fatalf("%d-level translations: %+v", format.NumLevels, translations)
+		}
+	}
+}
+
+func TestOutOfOrderResponsesAdvanceOwningWalkers(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 0x4000, 0x2000_0000)
+	mapPage(table, 2, 0x4000, 0x3000_0000)
+	if err := core.Submit(WalkRequest{ID: 1, PID: 1, VAddr: 0x4000}); err != nil {
+		t.Fatalf("submit PID 1: %v", err)
+	}
+	if err := core.Submit(WalkRequest{ID: 2, PID: 2, VAddr: 0x4000}); err != nil {
+		t.Fatalf("submit PID 2: %v", err)
+	}
+
+	for !core.IsDrained() {
+		reads := core.DrainMemoryReads()
+		for index := len(reads) - 1; index >= 0; index-- {
+			completeReads(t, core, []MemoryRead{reads[index]})
+		}
+	}
+	translations := core.DrainTranslations()
+	if len(translations) != 2 {
+		t.Fatalf("translations: %+v", translations)
+	}
+	byID := map[uint64]uint64{}
+	for _, translation := range translations {
+		byID[translation.RequestID] = translation.Page.PAddr
+	}
+	if byID[1] != 0x2000_0000 || byID[2] != 0x3000_0000 {
+		t.Fatalf("correlation: %+v", byID)
+	}
+}
+
+func TestResetRejectsStaleResponsesAndInvalidatesPWCs(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 0x4000, 0x2000_0000)
+	if err := core.Submit(WalkRequest{ID: 1, PID: 1, VAddr: 0x4000}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	read := core.DrainMemoryReads()[0]
+	core.Reset()
+
+	if err := core.CompleteMemoryRead(read.ID, make([]byte, 8)); !errors.Is(
+		err, ErrUnknownMemoryResponse) {
+		t.Fatalf("stale response: got %v", err)
+	}
+	for level := uint8(0); level < core.Config.Format.NumLevels-1; level++ {
+		if core.PWCOccupancy(level) != 0 {
+			t.Fatalf("PWC %d not reset", level)
+		}
+	}
+}
