@@ -1,7 +1,6 @@
 package gmmu
 
 import (
-	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
@@ -279,9 +278,8 @@ func TestFaultsAreStructured(t *testing.T) { //nolint:gocognit,funlen
 				if err != nil {
 					t.Fatalf("locate leaf: %v", err)
 				}
-				data := make([]byte, 8)
-				binary.LittleEndian.PutUint64(data, test.value)
-				if err := table.Storage.Write(walk.EntryPAddrs[3], data); err != nil {
+				if err := table.WriteRawEntry(
+					walk.EntryPAddrs[3], test.value); err != nil {
 					t.Fatalf("write leaf: %v", err)
 				}
 				if err := core.Submit(WalkRequest{
@@ -455,5 +453,49 @@ func TestStatisticsTrackPWQDelayAndPWCInvalidation(t *testing.T) {
 		if core.Stats.PWCInvalidations[level] != 1 {
 			t.Fatalf("PWC %d invalidations: %+v", level, core.Stats)
 		}
+	}
+}
+
+func TestPageTableWriteSnoopRepairsStaleCachedLeaf(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 0x4000, 0x2000_0000)
+
+	if err := core.Submit(WalkRequest{ID: 1, PID: 1, VAddr: 0x4000}); err != nil {
+		t.Fatalf("warm submit: %v", err)
+	}
+	finishCore(t, core)
+	core.DrainTranslations()
+
+	firstWalk, err := table.Walk(1, 0x4000)
+	if err != nil {
+		t.Fatalf("locate leaf table: %v", err)
+	}
+	staleLeafPAddr, err := table.Format.EntryAddress(
+		firstWalk.TablePAddrs[3], 3, 5)
+	if err != nil {
+		t.Fatalf("stale leaf address: %v", err)
+	}
+	staleData := make([]byte, table.Format.EntryBytes)
+
+	mapPage(table, 1, 0x5000, 0x3000_0000)
+	if err := core.Submit(WalkRequest{ID: 2, PID: 1, VAddr: 0x5000}); err != nil {
+		t.Fatalf("updated submit: %v", err)
+	}
+	reads := core.DrainMemoryReads()
+	if len(reads) != 1 || reads[0].PAddr != staleLeafPAddr {
+		t.Fatalf("leaf read after PWC hits: %+v", reads)
+	}
+	if err := core.CompleteMemoryRead(reads[0].ID, staleData); err != nil {
+		t.Fatalf("complete stale response: %v", err)
+	}
+
+	translations := core.DrainTranslations()
+	if len(translations) != 1 ||
+		translations[0].Page.PAddr != 0x3000_0000 {
+		t.Fatalf("coherent translation: %+v", translations)
+	}
+	if core.Stats.PTECoherenceRepairs != 1 {
+		t.Fatalf("coherence repairs: got %d, want 1",
+			core.Stats.PTECoherenceRepairs)
 	}
 }

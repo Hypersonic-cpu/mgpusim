@@ -96,6 +96,7 @@ type Stats struct {
 	MemoryReads         uint64
 	PTWBytes            uint64
 	MemoryResponses     uint64
+	PTECoherenceRepairs uint64
 
 	PWQQueueDelay        timing.VTimeInPicoSec
 	WalkerBusyTime       timing.VTimeInPicoSec
@@ -297,13 +298,26 @@ func (c *Core) CompleteMemoryReadAt(
 		c.failWalker(walkerIndex, "memory response has invalid entry size")
 		return nil
 	}
+	level := walker.CurrentLevel
+	if coherentData, repaired := c.Table.ResolveCoherentEntryData(
+		walker.EntryPAddrs[level], data); repaired {
+		data = coherentData
+		c.Stats.PTECoherenceRepairs++
+		simdebug.DPrintf(
+			simdebug.PageTable,
+			"coherence-repair req=%d pid=%d level=%d entry-pa=0x%x",
+			walker.Req.ID,
+			walker.Req.PID,
+			level,
+			walker.EntryPAddrs[level],
+		)
+	}
 	entry, err := decodePTEData(data)
 	if err != nil {
 		c.failWalker(walkerIndex, err.Error())
 		return nil
 	}
 
-	level := walker.CurrentLevel
 	walker.DecodedEntries[level] = binary.LittleEndian.Uint64(data)
 	walker.LevelCompleted[level] = true
 	if !entry.Present {

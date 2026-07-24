@@ -86,6 +86,7 @@ type RadixPageTable struct {
 	mu            sync.RWMutex
 	addressSpaces map[akitavm.PID]AddressSpace
 	pageMetadata  map[akitavm.PID]map[uint64]akitavm.Page
+	entryValues   map[uint64]uint64
 }
 
 // NewRadixPageTable creates an empty memory-backed page table.
@@ -115,6 +116,7 @@ func NewRadixPageTable(
 		Shadow:         shadow,
 		addressSpaces:  make(map[akitavm.PID]AddressSpace),
 		pageMetadata:   make(map[akitavm.PID]map[uint64]akitavm.Page),
+		entryValues:    make(map[uint64]uint64),
 	}, nil
 }
 
@@ -144,7 +146,7 @@ func (t *RadixPageTable) Remove(pid akitavm.PID, vAddr uint64) {
 		panic(err)
 	}
 	leaf := result.EntryPAddrs[result.NumLevels-1]
-	if err := t.Storage.Write(leaf, make([]byte, t.Format.EntryBytes)); err != nil {
+	if err := t.writeRawEntryLocked(leaf, 0); err != nil {
 		panic(err)
 	}
 	pageBase := t.pageBase(vAddr)
@@ -205,6 +207,41 @@ func (t *RadixPageTable) MappingMetadata(
 	defer t.mu.RUnlock()
 	page, ok := t.pageMetadata[pid][t.pageBase(vAddr)]
 	return page, ok
+}
+
+// ResolveCoherentEntryData applies the most recent simulated page-table write
+// to bytes returned by the memory hierarchy. Driver page-table updates write
+// backing storage directly, while an older copy of the containing cache line
+// may still reside in L2 or MALL. The entry-value journal models the coherence
+// snoop from that write without bypassing the timed PTW memory request.
+func (t *RadixPageTable) ResolveCoherentEntryData(
+	pAddr uint64,
+	observed []byte,
+) ([]byte, bool) {
+	if len(observed) != int(t.Format.EntryBytes) ||
+		t.Format.EntryBytes != 8 {
+		return observed, false
+	}
+
+	t.mu.RLock()
+	value, ok := t.entryValues[pAddr]
+	t.mu.RUnlock()
+	if !ok || binary.LittleEndian.Uint64(observed) == value {
+		return observed, false
+	}
+
+	coherent := make([]byte, t.Format.EntryBytes)
+	binary.LittleEndian.PutUint64(coherent, value)
+	return coherent, true
+}
+
+// WriteRawEntry updates one physical page-table entry and publishes the write
+// to the coherence journal. It is primarily useful for permission/fault
+// mutation tests and future accessed/dirty-bit maintenance.
+func (t *RadixPageTable) WriteRawEntry(pAddr, value uint64) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.writeRawEntryLocked(pAddr, value)
 }
 
 // Walk performs an authoritative physical-memory radix traversal.
@@ -416,9 +453,17 @@ func (t *RadixPageTable) writeEntry(pAddr uint64, entry PTE) error {
 	if err != nil {
 		return err
 	}
+	return t.writeRawEntryLocked(pAddr, value)
+}
+
+func (t *RadixPageTable) writeRawEntryLocked(pAddr, value uint64) error {
 	data := make([]byte, t.Format.EntryBytes)
 	binary.LittleEndian.PutUint64(data, value)
-	return t.Storage.Write(pAddr, data)
+	if err := t.Storage.Write(pAddr, data); err != nil {
+		return err
+	}
+	t.entryValues[pAddr] = value
+	return nil
 }
 
 func (t *RadixPageTable) pageBase(addr uint64) uint64 {

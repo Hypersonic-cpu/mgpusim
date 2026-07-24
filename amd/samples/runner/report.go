@@ -427,6 +427,19 @@ func (r *reporter) reportGMMUStats() {
 		reportGMMUCount("ptw_memory_reads", stats.MemoryReads)
 		reportGMMUCount("ptw_memory_bytes", stats.PTWBytes)
 		reportGMMUCount("ptw_memory_responses", stats.MemoryResponses)
+		reportGMMUCount("pte_coherence_repairs", stats.PTECoherenceRepairs)
+		reportGMMUCount(
+			"page_size_bytes",
+			uint64(1)<<comp.Core.Config.Format.PageOffsetBits,
+		)
+		reportGMMUCount(
+			"page_table_levels",
+			uint64(comp.Core.Config.Format.NumLevels),
+		)
+		reportGMMUCount(
+			"page_table_entry_bytes",
+			uint64(comp.Core.Config.Format.EntryBytes),
+		)
 		reportGMMUTime("pwq_average_delay", stats.AverageQueueDelay())
 		reportGMMUTime("walker_busy_time", stats.WalkerBusyTime)
 		reportGMMUTime("walk_average_latency", stats.AverageWalkLatency())
