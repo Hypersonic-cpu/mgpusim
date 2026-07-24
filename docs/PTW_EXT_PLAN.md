@@ -1433,7 +1433,7 @@ Update rules:
   - Deterministic pseudo-randomized physical-page allocation.
   - Sparse host backing remains independent of simulated physical-address spread.
   - Required unit tests pass.
-  - Commit: `<pending>`
+  - Commit: `97baffca`
 
 - [x] **3-b. Implement flag-controlled DPRINTF-style debug logging.**
   - Named debug categories.
@@ -1464,7 +1464,7 @@ Update rules:
   - Evidence: `out/ptw-latpc/mapping-trace/validation.md`
   - Commit: `<pending>`
 
-- [ ] **5. Implement the detailed memory-backed page table, GMMU, PTW, PWQ, and PWC.**
+- [-] **5. Implement the detailed memory-backed page table, GMMU, PTW, PWQ, and PWC.**
   - Physical root address per PID.
   - Memory-backed multi-level PDE/PTE hierarchy.
   - Array-based per-level walker state.
