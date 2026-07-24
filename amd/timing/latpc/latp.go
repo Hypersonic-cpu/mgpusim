@@ -1,6 +1,7 @@
 package latpc
 
 import (
+	"fmt"
 	"log"
 	"sort"
 	"sync"
@@ -44,6 +45,8 @@ type LATPResources struct {
 
 // LATPStats reports grouped-walk pressure and savings.
 type LATPStats struct {
+	AcceptedRequests        uint64
+	DiscardedRequests       uint64
 	Groups                  uint64
 	Members                 uint64
 	IndependentWalksAvoided uint64
@@ -140,6 +143,55 @@ func LATPComponents() []*LATPComp {
 // Stats returns a stable counter copy.
 func (c *LATPComp) Stats() LATPStats {
 	return c.middleware.stats
+}
+
+// IsDrained reports whether LATP holds no request or page-walk buffer entry.
+func (c *LATPComp) IsDrained() bool {
+	return c.middleware.isIdle() && len(c.middleware.admittedAt) == 0
+}
+
+// ValidateInvariants checks request conservation and prefetch accounting.
+func (c *LATPComp) ValidateInvariants() error {
+	m := c.middleware
+	if len(m.requests) != len(m.admittedAt) {
+		return fmt.Errorf(
+			"LATP %s: request timestamps=%d requests=%d",
+			c.Name(), len(m.admittedAt), len(m.requests))
+	}
+	if m.stats.CompletedMembers+m.stats.DiscardedRequests+
+		uint64(len(m.requests)) >
+		m.stats.AcceptedRequests {
+		return fmt.Errorf(
+			"LATP %s: completed/live requests exceed accepted requests",
+			c.Name())
+	}
+	if m.stats.IndependentWalksAvoided != m.stats.Prefetches {
+		return fmt.Errorf(
+			"LATP %s: walks avoided=%d prefetches=%d",
+			c.Name(), m.stats.IndependentWalksAvoided, m.stats.Prefetches)
+	}
+	classified := m.stats.UsefulPrefetches +
+		m.stats.LatePrefetches +
+		m.stats.UnusedPrefetches
+	if classified != m.stats.Prefetches {
+		return fmt.Errorf(
+			"LATP %s: classified prefetches=%d total=%d",
+			c.Name(), classified, m.stats.Prefetches)
+	}
+	if m.stats.Groups > 0 &&
+		m.stats.IndependentWalksAvoided != m.stats.Members-m.stats.Groups {
+		return fmt.Errorf(
+			"LATP %s: group/member walk-savings invariant failed",
+			c.Name())
+	}
+	if c.IsDrained() &&
+		m.stats.CompletedMembers+m.stats.DiscardedRequests !=
+			m.stats.AcceptedRequests {
+		return fmt.Errorf(
+			"LATP %s: drained accepted=%d completed=%d",
+			c.Name(), m.stats.AcceptedRequests, m.stats.CompletedMembers)
+	}
+	return nil
 }
 
 // LATPBuilder constructs a grouped page-walk buffer.
@@ -262,6 +314,7 @@ func (m *latpMiddleware) receiveRequest() bool {
 		}
 		member, found := RequestMetadata(req.ID)
 		m.topPort().RetrieveIncoming()
+		m.stats.AcceptedRequests++
 		if !found || !member.Regular || member.GroupCount < 2 {
 			m.enqueueBatch([]vmprotocol.TranslationReq{req})
 			progress = true
@@ -504,6 +557,10 @@ func (m *latpMiddleware) isIdle() bool {
 }
 
 func (m *latpMiddleware) reset() {
+	m.stats.DiscardedRequests +=
+		m.stats.AcceptedRequests -
+			m.stats.CompletedMembers -
+			m.stats.DiscardedRequests
 	m.pendingGroups = make(map[latpGroupKey]*latpPendingGroup)
 	m.ready = nil
 	m.requests = make(map[uint64]vmprotocol.TranslationReq)

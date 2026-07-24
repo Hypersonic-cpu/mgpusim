@@ -333,6 +333,25 @@ func RuntimeOpportunityStats() OpportunityStats {
 	return activeDetector.snapshot()
 }
 
+// ValidateRuntimeDetector asserts that no partial instruction group leaked.
+func ValidateRuntimeDetector() error {
+	if activeDetector == nil {
+		return nil
+	}
+	activeDetector.mu.Lock()
+	defer activeDetector.mu.Unlock()
+	if len(activeDetector.pending) != 0 {
+		members := 0
+		for _, instruction := range activeDetector.pending {
+			members += len(instruction)
+		}
+		return fmt.Errorf(
+			"latpc detector: %d instruction groups (%d members) remain pending",
+			len(activeDetector.pending), members)
+	}
+	return nil
+}
+
 type detectorHook struct{}
 
 func (h *detectorHook) Func(ctx hooking.HookCtx) {

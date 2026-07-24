@@ -150,6 +150,12 @@ func TestLATPFormsBatchAndPreservesOutOfOrderResponses(t *testing.T) {
 			t.Fatalf("response for %d lost", request.ID)
 		}
 	}
+	if !comp.IsDrained() {
+		t.Fatal("completed LATP retained live state")
+	}
+	if err := comp.ValidateInvariants(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestLATPWindowClosesPartialMissGroup(t *testing.T) {
@@ -184,6 +190,9 @@ func TestLATPBackpressureAndReset(t *testing.T) {
 	comp.Tick()
 	if !comp.middleware.isIdle() {
 		t.Fatal("reset leaked LATP state")
+	}
+	if err := comp.ValidateInvariants(); err != nil {
+		t.Fatal(err)
 	}
 	rsp := ports[LATPControlPortName].RetrieveOutgoing().(memcontrolprotocol.Rsp)
 	if !rsp.Success || rsp.Command != memcontrolprotocol.CmdReset {

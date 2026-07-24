@@ -12,6 +12,7 @@ import (
 	"github.com/sarchlab/akita/v5/tracing"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cu"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/gmmu"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/rdma"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
@@ -398,6 +399,7 @@ func (r *reporter) report() {
 	r.reportRDMATransactionCount()
 	r.reportDRAMTransactionCount()
 	r.reportGMMUStats()
+	r.reportLATPCStats()
 }
 
 //nolint:funlen // The fixed metric schema is deliberately emitted together.
@@ -428,6 +430,14 @@ func (r *reporter) reportGMMUStats() {
 		reportGMMUCount("ptw_memory_bytes", stats.PTWBytes)
 		reportGMMUCount("ptw_memory_responses", stats.MemoryResponses)
 		reportGMMUCount("pte_coherence_repairs", stats.PTECoherenceRepairs)
+		reportGMMUCount("latp_groups", stats.LATPGroups)
+		reportGMMUCount("latp_members", stats.LATPMembers)
+		reportGMMUCount(
+			"latp_independent_walks_avoided",
+			stats.IndependentWalksAvoided,
+		)
+		reportGMMUCount("latp_upper_reads_avoided", stats.UpperReadsAvoided)
+		reportGMMUCount("latp_leaf_pte_reads", stats.LeafPTEReads)
 		reportGMMUCount(
 			"page_size_bytes",
 			uint64(1)<<comp.Core.Config.Format.PageOffsetBits,
@@ -479,6 +489,225 @@ func (r *reporter) reportGMMUStats() {
 			reportGMMUCount("walk_latency_bucket_"+strconv.Itoa(bucket), count)
 		}
 	}
+}
+
+//nolint:funlen // Keep the stable LATPC metric schema in one place.
+func (r *reporter) reportLATPCStats() {
+	if err := latpc.ValidateRuntimeDetector(); err != nil {
+		panic(err)
+	}
+	for _, comp := range latpc.LATCComponents() {
+		if err := comp.ValidateInvariants(); err != nil {
+			panic(err)
+		}
+		if !comp.IsDrained() {
+			panic("LATC component did not drain: " + comp.Name())
+		}
+	}
+	for _, comp := range latpc.LATPComponents() {
+		if err := comp.ValidateInvariants(); err != nil {
+			panic(err)
+		}
+		if !comp.IsDrained() {
+			panic("LATP component did not drain: " + comp.Name())
+		}
+	}
+
+	reportCount := func(location, what string, value uint64) {
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: location, What: what, Value: float64(value), Unit: "count",
+		})
+	}
+	reportRatio := func(location, what string, value float64) {
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: location, What: what, Value: value, Unit: "ratio",
+		})
+	}
+	reportTime := func(location, what string, value timing.VTimeInPicoSec) {
+		r.dataRecorder.InsertData(tableName, metric{
+			Location: location, What: what, Value: secondsOf(value), Unit: "second",
+		})
+	}
+
+	opportunity := latpc.RuntimeOpportunityStats()
+	reportCount("LATPC.Detector", "instructions", opportunity.Instructions)
+	reportCount("LATPC.Detector", "raw_members", opportunity.RawMembers)
+	reportCount("LATPC.Detector", "unique_vpns", opportunity.UniqueVPNs)
+	reportCount("LATPC.Detector", "duplicate_vpns", opportunity.DuplicateVPNs)
+	reportCount("LATPC.Detector", "regular_groups", opportunity.RegularGroups)
+	reportCount("LATPC.Detector", "regular_members", opportunity.RegularMembers)
+	reportCount(
+		"LATPC.Detector",
+		"same_leaf_page_groups",
+		opportunity.SameLeafPageGroups,
+	)
+	if opportunity.UniqueVPNs > 0 {
+		reportRatio(
+			"LATPC.Detector",
+			"regularity_coverage",
+			float64(opportunity.RegularMembers)/float64(opportunity.UniqueVPNs),
+		)
+	}
+	if opportunity.SameLeafPageGroups > 0 {
+		reportRatio(
+			"LATPC.Detector",
+			"same_leaf_regular_grouping_rate",
+			float64(opportunity.RegularGroups)/
+				float64(opportunity.SameLeafPageGroups),
+		)
+	}
+	divergence := make([]int, 0, len(opportunity.PageDivergence))
+	for pages := range opportunity.PageDivergence {
+		divergence = append(divergence, pages)
+	}
+	sort.Ints(divergence)
+	for _, pages := range divergence {
+		reportCount(
+			"LATPC.Detector",
+			"page_divergence_"+strconv.Itoa(pages),
+			opportunity.PageDivergence[pages],
+		)
+	}
+
+	var latcAggregate latpc.LATCStats
+	for _, comp := range latpc.LATCComponents() {
+		stats := comp.Stats()
+		latcAggregate.AcceptedRequests += stats.AcceptedRequests
+		latcAggregate.DiscardedRequests += stats.DiscardedRequests
+		latcAggregate.DiscardedReservations += stats.DiscardedReservations
+		latcAggregate.GroupsPresented += stats.GroupsPresented
+		latcAggregate.CompressedAllocations += stats.CompressedAllocations
+		latcAggregate.MSHRAllocations += stats.MSHRAllocations
+		latcAggregate.RepresentedTranslations += stats.RepresentedTranslations
+		latcAggregate.ReservationFailures += stats.ReservationFailures
+		latcAggregate.GroupedEntryLifetime += stats.GroupedEntryLifetime
+		latcAggregate.MemberCompletionDelay += stats.MemberCompletionDelay
+		latcAggregate.CompletedGroups += stats.CompletedGroups
+		latcAggregate.CompletedMembers += stats.CompletedMembers
+		if stats.PeakMSHROccupancy > latcAggregate.PeakMSHROccupancy {
+			latcAggregate.PeakMSHROccupancy = stats.PeakMSHROccupancy
+		}
+	}
+	reportCount("LATPC.LATC", "accepted_requests", latcAggregate.AcceptedRequests)
+	reportCount(
+		"LATPC.LATC",
+		"discarded_requests",
+		latcAggregate.DiscardedRequests,
+	)
+	reportCount(
+		"LATPC.LATC",
+		"discarded_reservations",
+		latcAggregate.DiscardedReservations,
+	)
+	reportCount("LATPC.LATC", "groups_presented", latcAggregate.GroupsPresented)
+	reportCount(
+		"LATPC.LATC",
+		"compressed_allocations",
+		latcAggregate.CompressedAllocations,
+	)
+	reportCount("LATPC.LATC", "mshr_allocations", latcAggregate.MSHRAllocations)
+	reportCount(
+		"LATPC.LATC",
+		"represented_translations",
+		latcAggregate.RepresentedTranslations,
+	)
+	reportCount(
+		"LATPC.LATC",
+		"reservation_failures",
+		latcAggregate.ReservationFailures,
+	)
+	reportCount(
+		"LATPC.LATC",
+		"peak_mshr_occupancy",
+		uint64(latcAggregate.PeakMSHROccupancy),
+	)
+	reportRatio(
+		"LATPC.LATC",
+		"compression_ratio",
+		latcAggregate.CompressionRatio(),
+	)
+	reportTime(
+		"LATPC.LATC",
+		"average_grouped_entry_lifetime",
+		latcAggregate.AverageGroupedEntryLifetime(),
+	)
+	reportTime(
+		"LATPC.LATC",
+		"average_member_completion_delay",
+		latcAggregate.AverageMemberCompletionDelay(),
+	)
+
+	var latpAggregate latpc.LATPStats
+	for _, comp := range latpc.LATPComponents() {
+		stats := comp.Stats()
+		latpAggregate.AcceptedRequests += stats.AcceptedRequests
+		latpAggregate.DiscardedRequests += stats.DiscardedRequests
+		latpAggregate.Groups += stats.Groups
+		latpAggregate.Members += stats.Members
+		latpAggregate.IndependentWalksAvoided += stats.IndependentWalksAvoided
+		latpAggregate.UpperReadsAvoided += stats.UpperReadsAvoided
+		latpAggregate.PWBufferFullStalls += stats.PWBufferFullStalls
+		latpAggregate.QueueDelay += stats.QueueDelay
+		latpAggregate.CompletedMembers += stats.CompletedMembers
+		latpAggregate.RegularMisses += stats.RegularMisses
+		latpAggregate.Prefetches += stats.Prefetches
+		latpAggregate.UsefulPrefetches += stats.UsefulPrefetches
+		latpAggregate.LatePrefetches += stats.LatePrefetches
+		latpAggregate.UnusedPrefetches += stats.UnusedPrefetches
+		if stats.PeakPWBufferOccupancy > latpAggregate.PeakPWBufferOccupancy {
+			latpAggregate.PeakPWBufferOccupancy = stats.PeakPWBufferOccupancy
+		}
+	}
+	reportCount("LATPC.LATP", "accepted_requests", latpAggregate.AcceptedRequests)
+	reportCount(
+		"LATPC.LATP",
+		"discarded_requests",
+		latpAggregate.DiscardedRequests,
+	)
+	reportCount("LATPC.LATP", "groups", latpAggregate.Groups)
+	reportCount("LATPC.LATP", "members", latpAggregate.Members)
+	reportCount(
+		"LATPC.LATP",
+		"walks_saved",
+		latpAggregate.IndependentWalksAvoided,
+	)
+	reportCount(
+		"LATPC.LATP",
+		"upper_reads_saved",
+		latpAggregate.UpperReadsAvoided,
+	)
+	reportCount(
+		"LATPC.LATP",
+		"pw_buffer_full_stalls",
+		latpAggregate.PWBufferFullStalls,
+	)
+	reportCount(
+		"LATPC.LATP",
+		"peak_pw_buffer_occupancy",
+		uint64(latpAggregate.PeakPWBufferOccupancy),
+	)
+	reportCount("LATPC.LATP", "prefetches", latpAggregate.Prefetches)
+	reportCount(
+		"LATPC.LATP",
+		"useful_prefetches",
+		latpAggregate.UsefulPrefetches,
+	)
+	reportCount("LATPC.LATP", "late_prefetches", latpAggregate.LatePrefetches)
+	reportCount(
+		"LATPC.LATP",
+		"unused_prefetches",
+		latpAggregate.UnusedPrefetches,
+	)
+	reportRatio(
+		"LATPC.LATP",
+		"prefetch_coverage",
+		latpAggregate.PrefetchCoverage(),
+	)
+	reportRatio(
+		"LATPC.LATP",
+		"prefetch_accuracy",
+		latpAggregate.PrefetchAccuracy(),
+	)
 }
 
 func (r *reporter) reportKernelTime() {

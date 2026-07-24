@@ -157,6 +157,12 @@ func TestLATCCompressesRegularGroupAndReplaysEveryWaiter(t *testing.T) {
 	if stats.CompletedGroups != 1 || stats.CompletedMembers != 3 {
 		t.Fatalf("completion statistics: %+v", stats)
 	}
+	if !comp.IsDrained() {
+		t.Fatal("completed LATC retained live state")
+	}
+	if err := comp.ValidateInvariants(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestLATCHandlesDuplicateVPNAndPartialCompletion(t *testing.T) {
@@ -178,6 +184,9 @@ func TestLATCHandlesDuplicateVPNAndPartialCompletion(t *testing.T) {
 	comp.Tick()
 	if len(comp.middleware.reservations) != 0 {
 		t.Fatal("final completion did not release grouped entry")
+	}
+	if err := comp.ValidateInvariants(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -209,6 +218,9 @@ func TestLATCReservationBackpressureAndReset(t *testing.T) {
 		len(comp.middleware.requests) != 0 ||
 		len(comp.middleware.pendingForward) != 0 {
 		t.Fatal("reset leaked LATC state")
+	}
+	if err := comp.ValidateInvariants(); err != nil {
+		t.Fatal(err)
 	}
 	rsp := ports[LATCControlPortName].RetrieveOutgoing().(memcontrolprotocol.Rsp)
 	if !rsp.Success || rsp.Command != memcontrolprotocol.CmdReset {

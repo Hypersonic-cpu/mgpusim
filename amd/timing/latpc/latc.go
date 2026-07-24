@@ -44,6 +44,9 @@ type LATCResources struct {
 
 // LATCStats reports compression, pressure, and completion behavior.
 type LATCStats struct {
+	AcceptedRequests        uint64
+	DiscardedRequests       uint64
+	DiscardedReservations   uint64
 	GroupsPresented         uint64
 	CompressedAllocations   uint64
 	MSHRAllocations         uint64
@@ -147,6 +150,66 @@ func LATCComponents() []*LATCComp {
 // Stats returns a stable copy of the component counters.
 func (c *LATCComp) Stats() LATCStats {
 	return c.middleware.stats
+}
+
+// IsDrained reports whether LATC holds no request or logical reservation.
+func (c *LATCComp) IsDrained() bool {
+	return c.middleware.isIdle() &&
+		len(c.middleware.requestToReserve) == 0 &&
+		len(c.middleware.requests) == 0
+}
+
+// ValidateInvariants checks counter conservation and internal ownership.
+func (c *LATCComp) ValidateInvariants() error {
+	m := c.middleware
+	if len(m.requestToReserve) != len(m.requests) {
+		return fmt.Errorf(
+			"LATC %s: request ownership mismatch: reservations=%d requests=%d",
+			c.Name(), len(m.requestToReserve), len(m.requests))
+	}
+	remaining := 0
+	for id, reservation := range m.reservations {
+		if reservation.remaining <= 0 {
+			return fmt.Errorf(
+				"LATC %s: reservation %d has non-positive remaining count",
+				c.Name(), id)
+		}
+		remaining += reservation.remaining
+	}
+	if remaining != len(m.requests) {
+		return fmt.Errorf(
+			"LATC %s: reservation members=%d live requests=%d",
+			c.Name(), remaining, len(m.requests))
+	}
+	if m.stats.CompletedMembers+m.stats.DiscardedRequests+
+		uint64(len(m.requests)) >
+		m.stats.AcceptedRequests {
+		return fmt.Errorf(
+			"LATC %s: completed/live requests exceed accepted requests",
+			c.Name())
+	}
+	if m.stats.CompletedGroups+m.stats.DiscardedReservations+
+		uint64(len(m.reservations)) >
+		m.stats.MSHRAllocations {
+		return fmt.Errorf(
+			"LATC %s: completed/live reservations exceed allocations",
+			c.Name())
+	}
+	if m.stats.CompressedAllocations > m.stats.MSHRAllocations {
+		return fmt.Errorf(
+			"LATC %s: compressed allocations exceed all allocations",
+			c.Name())
+	}
+	if c.IsDrained() &&
+		(m.stats.CompletedMembers+m.stats.DiscardedRequests !=
+			m.stats.AcceptedRequests ||
+			m.stats.CompletedGroups+m.stats.DiscardedReservations !=
+				m.stats.MSHRAllocations) {
+		return fmt.Errorf(
+			"LATC %s: drained counters do not conserve requests/reservations",
+			c.Name())
+	}
+	return nil
 }
 
 // LATCBuilder constructs a LATC component.
@@ -285,6 +348,7 @@ func (m *latcMiddleware) receiveRequest() bool {
 		instruction.requests[req.ID] = latcRequest{
 			original: req, admittedAt: m.comp.CurrentTime(),
 		}
+		m.stats.AcceptedRequests++
 		m.topPort().RetrieveIncoming()
 		if len(instruction.members) == int(instruction.count) {
 			delete(m.collecting, member.InstructionID)
@@ -549,6 +613,14 @@ func (m *latcMiddleware) isIdle() bool {
 }
 
 func (m *latcMiddleware) reset() {
+	m.stats.DiscardedRequests +=
+		m.stats.AcceptedRequests -
+			m.stats.CompletedMembers -
+			m.stats.DiscardedRequests
+	m.stats.DiscardedReservations +=
+		m.stats.MSHRAllocations -
+			m.stats.CompletedGroups -
+			m.stats.DiscardedReservations
 	m.collecting = make(map[uint64]*latcInstruction)
 	m.ready = nil
 	m.reservations = make(map[uint64]*latcReservation)
