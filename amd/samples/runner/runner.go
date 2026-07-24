@@ -16,6 +16,7 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/samples/runner/emusystem"
 	"github.com/sarchlab/mgpusim/v5/amd/samples/runner/timingconfig"
 	"github.com/sarchlab/mgpusim/v5/amd/sampling"
+	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
 )
 
 type verificationPreEnablingBenchmark interface {
@@ -44,6 +45,9 @@ type Runner struct {
 // Init initializes the platform simulate
 func (r *Runner) Init() *Runner {
 	r.parseFlag()
+	if err := simdebug.ConfigureFromEnv(); err != nil {
+		log.Panicf("configure simulation debug logging: %v", err)
+	}
 
 	log.SetFlags(log.Llongfile | log.Ldate | log.Ltime)
 
@@ -185,6 +189,9 @@ func (r *Runner) Run() {
 
 	r.Driver().Terminate()
 	r.simulation.Terminate()
+	if err := simdebug.Close(); err != nil {
+		log.Panicf("close simulation debug logging: %v", err)
+	}
 }
 
 // Driver returns the GPU driver used by the current runner.
