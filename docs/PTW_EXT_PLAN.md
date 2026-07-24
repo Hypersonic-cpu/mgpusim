@@ -1495,7 +1495,7 @@ Update rules:
   - Evidence: `out/ptw-latpc/replay-trace/validation.md`
   - Commit: `b139e2f5`
 
-- [ ] **8. Complete all non-LATPC functions through the agreed design boundary and implement statistics.**
+- [x] **8. Complete all non-LATPC functions through the agreed design boundary and implement statistics.**
   - Permissions.
   - Per-PID roots.
   - TLB invalidation.
@@ -1509,9 +1509,9 @@ Update rules:
   - Replay metrics.
   - Controlled statistics tests.
   - Do not implement Regularity Detector, LATC, or LATP.
-  - Commit(s): `<pending>`
+  - Commit: `d657659e`
 
-- [ ] **9. Run selected applications without debug flags and produce the timing report.**
+- [x] **9. Run selected applications without debug flags and produce the timing report.**
   - Run at least four representative timing workloads.
   - Use one GPU, CDNA3, MI300X timing mode, verification, and a 12 GiB limit.
   - Record simulated kernel time, cycles where available, host wall time, RSS, TLB metrics, walk metrics, PWC rates, and PTW memory behavior.
@@ -1522,7 +1522,7 @@ Update rules:
 - [x] All mandatory stop conditions were respected.
 - [x] `go test ./...` passes, or every pre-existing/unrelated failure is documented.
 - [x] All baseline-passing functional workloads were rerun after implementation.
-- [ ] Debug logging is disabled for timing measurements.
+- [x] Debug logging is disabled for timing measurements.
 - [x] No generated logs, binaries, SQLite files, or unrelated changes were committed.
 - [x] Commit list and SHAs are recorded in the final Codex report.
 - [x] LATPC-specific extensions were not implemented.

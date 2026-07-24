@@ -58,6 +58,7 @@ func TestBuildMI300XPlatform(t *testing.T) {
 	buildPlatform(t, "mi300x", 1)
 }
 
+//nolint:funlen // One integration test checks the complete timing wiring invariant.
 func TestDetailedTranslationUsesRadixAndPhysicalL1I(t *testing.T) {
 	s := simulation.MakeBuilder().
 		WithoutMonitoring().

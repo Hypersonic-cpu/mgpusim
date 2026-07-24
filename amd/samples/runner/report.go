@@ -400,6 +400,7 @@ func (r *reporter) report() {
 	r.reportGMMUStats()
 }
 
+//nolint:funlen // The fixed metric schema is deliberately emitted together.
 func (r *reporter) reportGMMUStats() {
 	for _, comp := range r.gmmus {
 		stats := comp.Stats()

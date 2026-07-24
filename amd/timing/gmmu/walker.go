@@ -266,6 +266,8 @@ func (c *Core) CompleteMemoryRead(requestID uint64, data []byte) error {
 }
 
 // CompleteMemoryReadAt correlates a response and accounts for PTW latency.
+//
+//nolint:funlen // A response advances the complete, level-dependent walk state.
 func (c *Core) CompleteMemoryReadAt(
 	requestID uint64,
 	data []byte,
