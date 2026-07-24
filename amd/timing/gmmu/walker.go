@@ -258,6 +258,12 @@ func (c *Core) Submit(req WalkRequest) error {
 func (c *Core) SubmitAt(req WalkRequest, now timing.VTimeInPicoSec) error {
 	c.AdvanceTime(now)
 	now = c.currentTime
+	if walkerIndex := c.activeLATPWalker(req); walkerIndex >= 0 {
+		c.Stats.RequestsAccepted++
+		c.Stats.TranslationRequests++
+		c.mergeActiveLATPWalker(walkerIndex, req)
+		return nil
+	}
 	if !c.CanSubmit() {
 		c.Stats.RequestsRejected++
 		c.Stats.PWQFullStalls++
@@ -293,6 +299,15 @@ func (c *Core) SubmitAt(req WalkRequest, now timing.VTimeInPicoSec) error {
 	}
 	c.dispatch()
 	return nil
+}
+
+// CanSubmitRequest reports whether a request can enter the PWQ or merge into
+// an already active LATP walk.
+func (c *Core) CanSubmitRequest(req WalkRequest) bool {
+	if c.paused || c.draining {
+		return false
+	}
+	return c.activeLATPWalker(req) >= 0 || c.CanSubmit()
 }
 
 // CanSubmit reports whether Top may retrieve another translation request.
@@ -539,9 +554,6 @@ func (c *Core) takeNextWalkGroup() ([]WalkRequest, bool) {
 			requests = append(requests, req)
 		}
 	}
-	if len(requests) < count {
-		return nil, false
-	}
 	remaining := c.pwq[:0]
 	for _, req := range c.pwq {
 		if req.HasGroup &&
@@ -590,7 +602,7 @@ func (c *Core) startWalker(walkerIndex int, requests []WalkRequest) {
 		delete(c.submittedAt, memberReq.ID)
 	}
 	c.Stats.WalksStarted++
-	if len(requests) > 1 {
+	if isLATPGroupRequest(req) {
 		saved := uint64(len(requests) - 1)
 		c.Stats.LATPGroups++
 		c.Stats.LATPMembers += uint64(len(requests))
@@ -643,7 +655,7 @@ func (c *Core) advanceWalker(walkerIndex int) {
 		walker.CurrentLevel++
 		walker.TablePAddrs[walker.CurrentLevel] = value.ChildTablePAddr
 	}
-	if len(walker.GroupReqs) > 1 {
+	if isLATPGroupRequest(walker.Req) {
 		c.issueGroupLeafReads(walkerIndex)
 		return
 	}
@@ -688,43 +700,87 @@ func (c *Core) issueRead(walkerIndex int) {
 
 func (c *Core) issueGroupLeafReads(walkerIndex int) {
 	walker := &c.Walkers[walkerIndex]
-	level := c.Config.Format.NumLevels - 1
 	walker.WaitingMemory = true
-	for memberIndex, req := range walker.GroupReqs {
-		indices, err := c.Config.Format.ExtractIndices(req.VAddr)
-		if err != nil {
-			c.appendFault(req, level, err.Error())
-			continue
-		}
-		entryPAddr, err := c.Config.Format.EntryAddress(
-			walker.TablePAddrs[level], level, indices[level])
-		if err != nil {
-			c.appendFault(req, level, err.Error())
-			continue
-		}
-		requestID := c.nextMemoryID
-		c.nextMemoryID++
-		walker.GroupOutstanding++
-		walker.Reads++
-		c.reqToWalker[requestID] = memoryTarget{
-			WalkerIndex: walkerIndex,
-			GroupMember: memberIndex,
-		}
-		c.memoryIssued[requestID] = c.currentTime
-		c.outgoing = append(c.outgoing, MemoryRead{
-			ID:           requestID,
-			Walker:       walkerIndex,
-			PID:          req.PID,
-			PAddr:        entryPAddr,
-			ByteSize:     uint64(c.Config.Format.EntryBytes),
-			TrafficClass: PTETrafficClass,
-		})
-		c.Stats.MemoryReads++
-		c.Stats.PTWBytes += uint64(c.Config.Format.EntryBytes)
-		c.Stats.LeafPTEReads++
+	for memberIndex := range walker.GroupReqs {
+		c.issueGroupLeafRead(walkerIndex, memberIndex)
 	}
 	if walker.GroupOutstanding == 0 {
 		c.finishWalker(walkerIndex)
+	}
+}
+
+func (c *Core) issueGroupLeafRead(walkerIndex, memberIndex int) {
+	walker := &c.Walkers[walkerIndex]
+	req := walker.GroupReqs[memberIndex]
+	level := c.Config.Format.NumLevels - 1
+	indices, err := c.Config.Format.ExtractIndices(req.VAddr)
+	if err != nil {
+		c.appendFault(req, level, err.Error())
+		return
+	}
+	entryPAddr, err := c.Config.Format.EntryAddress(
+		walker.TablePAddrs[level], level, indices[level])
+	if err != nil {
+		c.appendFault(req, level, err.Error())
+		return
+	}
+	requestID := c.nextMemoryID
+	c.nextMemoryID++
+	walker.GroupOutstanding++
+	walker.Reads++
+	c.reqToWalker[requestID] = memoryTarget{
+		WalkerIndex: walkerIndex,
+		GroupMember: memberIndex,
+	}
+	c.memoryIssued[requestID] = c.currentTime
+	c.outgoing = append(c.outgoing, MemoryRead{
+		ID:           requestID,
+		Walker:       walkerIndex,
+		PID:          req.PID,
+		PAddr:        entryPAddr,
+		ByteSize:     uint64(c.Config.Format.EntryBytes),
+		TrafficClass: PTETrafficClass,
+	})
+	c.Stats.MemoryReads++
+	c.Stats.PTWBytes += uint64(c.Config.Format.EntryBytes)
+	c.Stats.LeafPTEReads++
+}
+
+func isLATPGroupRequest(req WalkRequest) bool {
+	return req.HasGroup &&
+		req.Group.LATPBatchID != 0 &&
+		req.Group.LATPBatchCount > 1
+}
+
+func (c *Core) activeLATPWalker(req WalkRequest) int {
+	if !isLATPGroupRequest(req) {
+		return -1
+	}
+	for index := range c.Walkers {
+		walker := &c.Walkers[index]
+		if !walker.Busy ||
+			!isLATPGroupRequest(walker.Req) ||
+			walker.Req.Group.LATPBatchID != req.Group.LATPBatchID ||
+			walker.Req.PID != req.PID {
+			continue
+		}
+		return index
+	}
+	return -1
+}
+
+func (c *Core) mergeActiveLATPWalker(
+	walkerIndex int,
+	req WalkRequest,
+) {
+	walker := &c.Walkers[walkerIndex]
+	walker.GroupReqs = append(walker.GroupReqs, req)
+	c.Stats.LATPMembers++
+	c.Stats.IndependentWalksAvoided++
+	c.Stats.UpperReadsAvoided += uint64(c.Config.Format.NumLevels - 1)
+	if walker.CurrentLevel == c.Config.Format.NumLevels-1 {
+		walker.WaitingMemory = true
+		c.issueGroupLeafRead(walkerIndex, len(walker.GroupReqs)-1)
 	}
 }
 

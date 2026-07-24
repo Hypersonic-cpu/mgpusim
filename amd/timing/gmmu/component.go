@@ -208,9 +208,6 @@ func (m *componentMiddleware) faultPort() messaging.Port {
 }
 
 func (m *componentMiddleware) receiveTranslationRequest() bool {
-	if !m.comp.Core.CanSubmit() {
-		return false
-	}
 	message := m.topPort().PeekIncoming()
 	if message == nil {
 		return false
@@ -219,8 +216,6 @@ func (m *componentMiddleware) receiveTranslationRequest() bool {
 	if !ok {
 		log.Panicf("gmmu: unexpected Top message %T", message)
 	}
-	m.topPort().RetrieveIncoming()
-	m.topRequests[req.ID] = req
 	walkReq := WalkRequest{
 		ID: req.ID, PID: req.PID, VAddr: req.VAddr, DeviceID: req.DeviceID,
 	}
@@ -228,6 +223,11 @@ func (m *componentMiddleware) receiveTranslationRequest() bool {
 		walkReq.Group = group
 		walkReq.HasGroup = true
 	}
+	if !m.comp.Core.CanSubmitRequest(walkReq) {
+		return false
+	}
+	m.topPort().RetrieveIncoming()
+	m.topRequests[req.ID] = req
 	err := m.comp.Core.SubmitAt(walkReq, m.comp.CurrentTime())
 	if err != nil {
 		panic(err)

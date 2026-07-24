@@ -601,3 +601,112 @@ func TestLATPLeafResponsesMayCompleteOutOfOrder(t *testing.T) {
 		t.Fatal("grouped walker did not drain")
 	}
 }
+
+func latpWalkRequest(
+	id, batchID uint64,
+	position, count uint16,
+	vpn uint64,
+) WalkRequest {
+	return WalkRequest{
+		ID:    id,
+		PID:   1,
+		VAddr: vpn * 4096,
+		Group: latpc.GroupMember{
+			LATPBatchID:    batchID,
+			LATPBatchCount: count,
+			GroupPosition:  position,
+		},
+		HasGroup: true,
+	}
+}
+
+func TestLATPBatchMergesWhileQueued(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), func(config *Config) {
+		config.NumWalkers = 1
+	})
+	mapPage(table, 1, 1*4096, 101*4096)
+	mapPage(table, 1, 40*4096, 140*4096)
+	mapPage(table, 1, 41*4096, 141*4096)
+	if err := core.Submit(WalkRequest{ID: 1, PID: 1, VAddr: 1 * 4096}); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.Submit(latpWalkRequest(2, 10, 0, 2, 40)); err != nil {
+		t.Fatal(err)
+	}
+	if err := core.Submit(latpWalkRequest(3, 10, 1, 2, 41)); err != nil {
+		t.Fatal(err)
+	}
+	if len(core.pwq) != 2 {
+		t.Fatalf("queued batch members: got %d, want 2", len(core.pwq))
+	}
+	finishCore(t, core)
+	if core.Stats.LATPGroups != 1 ||
+		core.Stats.LATPMembers != 2 ||
+		core.Stats.IndependentWalksAvoided != 1 {
+		t.Fatalf("queued merge statistics: %+v", core.Stats)
+	}
+}
+
+func TestLATPBatchMergesDuringUpperWalk(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 50*4096, 150*4096)
+	mapPage(table, 1, 51*4096, 151*4096)
+	if err := core.Submit(latpWalkRequest(1, 11, 0, 2, 50)); err != nil {
+		t.Fatal(err)
+	}
+	firstUpperRead := core.DrainMemoryReads()
+	if len(firstUpperRead) != 1 {
+		t.Fatalf("initial upper reads: %+v", firstUpperRead)
+	}
+	if err := core.Submit(latpWalkRequest(2, 11, 1, 2, 51)); err != nil {
+		t.Fatal(err)
+	}
+	completeReads(t, core, firstUpperRead)
+	finishCore(t, core)
+	if core.Stats.MemoryReads != 5 ||
+		core.Stats.WalksStarted != 1 ||
+		core.Stats.LATPMembers != 2 ||
+		core.Stats.UpperReadsAvoided != 3 {
+		t.Fatalf("upper-phase merge statistics: %+v", core.Stats)
+	}
+}
+
+func TestLATPBatchMergesDuringLeafWalk(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 60*4096, 160*4096)
+	mapPage(table, 1, 61*4096, 161*4096)
+	if err := core.Submit(latpWalkRequest(1, 12, 0, 2, 60)); err != nil {
+		t.Fatal(err)
+	}
+	for level := 0; level < 3; level++ {
+		reads := core.DrainMemoryReads()
+		if len(reads) != 1 {
+			t.Fatalf("upper level %d reads: %+v", level, reads)
+		}
+		completeReads(t, core, reads)
+	}
+	firstLeafRead := core.DrainMemoryReads()
+	if len(firstLeafRead) != 1 {
+		t.Fatalf("initial leaf reads: %+v", firstLeafRead)
+	}
+	if err := core.Submit(latpWalkRequest(2, 12, 1, 2, 61)); err != nil {
+		t.Fatal(err)
+	}
+	secondLeafRead := core.DrainMemoryReads()
+	if len(secondLeafRead) != 1 {
+		t.Fatalf("late leaf reads: %+v", secondLeafRead)
+	}
+	completeReads(t, core, secondLeafRead)
+	completeReads(t, core, firstLeafRead)
+	translations := core.DrainTranslations()
+	if len(translations) != 2 || !core.IsDrained() {
+		t.Fatalf("late leaf completion: translations=%+v drained=%t",
+			translations, core.IsDrained())
+	}
+	if core.Stats.MemoryReads != 5 ||
+		core.Stats.WalksStarted != 1 ||
+		core.Stats.LATPMembers != 2 ||
+		core.Stats.IndependentWalksAvoided != 1 {
+		t.Fatalf("leaf-phase merge statistics: %+v", core.Stats)
+	}
+}

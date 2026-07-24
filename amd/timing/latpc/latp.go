@@ -111,7 +111,6 @@ type latpMiddleware struct {
 	ready         []*latpBatch
 	requests      map[uint64]vmprotocol.TranslationReq
 	admittedAt    map[uint64]timing.VTimeInPicoSec
-	nextBatchID   uint64
 	stats         LATPStats
 	draining      bool
 	pendingDrain  *memcontrolprotocol.Req
@@ -258,7 +257,6 @@ func (b LATPBuilder) Build(name string) *LATPComp {
 		pendingGroups: make(map[latpGroupKey]*latpPendingGroup),
 		requests:      make(map[uint64]vmprotocol.TranslationReq),
 		admittedAt:    make(map[uint64]timing.VTimeInPicoSec),
-		nextBatchID:   1,
 	}
 	comp.middleware = middleware
 	modelComp.AddMiddleware(middleware)
@@ -383,8 +381,10 @@ func (m *latpMiddleware) closeGroup(
 func (m *latpMiddleware) enqueueBatch(
 	requests []vmprotocol.TranslationReq,
 ) {
-	batch := &latpBatch{id: m.nextBatchID, requests: requests}
-	m.nextBatchID++
+	batch := &latpBatch{
+		id:       timing.GetIDGenerator().Generate(),
+		requests: requests,
+	}
 	ids := make([]uint64, len(requests))
 	for i, request := range requests {
 		ids[i] = request.ID
