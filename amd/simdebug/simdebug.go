@@ -25,6 +25,8 @@ const (
 	PWC Flag = "PWC"
 	// PTWMem reports page-table-walk memory requests.
 	PTWMem Flag = "PTWMem"
+	// MemRoute reports source, destination, and connection for sent messages.
+	MemRoute Flag = "MemRoute"
 	// TLBReplay reports requests replayed after translation.
 	TLBReplay Flag = "TLBReplay"
 	// TLBFill reports TLB fills and their waiters.
@@ -41,7 +43,7 @@ var (
 )
 
 var knownFlags = map[Flag]struct{}{
-	VMMap: {}, PageTable: {}, GMMUWalk: {}, PWC: {}, PTWMem: {},
+	VMMap: {}, PageTable: {}, GMMUWalk: {}, PWC: {}, PTWMem: {}, MemRoute: {},
 	TLBReplay: {}, TLBFill: {}, Fault: {},
 }
 

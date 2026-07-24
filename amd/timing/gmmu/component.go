@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/sarchlab/akita/v5/mem"
 	"github.com/sarchlab/akita/v5/mem/memcontrolprotocol"
 	"github.com/sarchlab/akita/v5/mem/memprotocol"
 	"github.com/sarchlab/akita/v5/mem/vm/vmprotocol"
@@ -47,9 +48,8 @@ type FaultAck struct {
 
 // Spec contains immutable component and routing configuration.
 type Spec struct {
-	Freq         timing.Freq          `json:"freq"`
-	MemoryModule messaging.RemotePort `json:"memory_module"`
-	FaultModule  messaging.RemotePort `json:"fault_module"`
+	Freq        timing.Freq          `json:"freq"`
+	FaultModule messaging.RemotePort `json:"fault_module"`
 }
 
 // State contains checkpointable control state.
@@ -61,8 +61,9 @@ type State struct {
 
 // Resources holds the shared authoritative radix page table.
 type Resources struct {
-	PageTable    *mgpuvm.RadixPageTable `json:"-"`
-	WalkerConfig Config                 `json:"-"`
+	PageTable    *mgpuvm.RadixPageTable  `json:"-"`
+	WalkerConfig Config                  `json:"-"`
+	MemoryMapper mem.AddressToPortMapper `json:"-"`
 }
 
 // Comp wraps an Akita component and exposes its detailed walker core.
@@ -225,7 +226,7 @@ func (m *componentMiddleware) collectCoreOutput() bool {
 		}
 		msg.ID = timing.GetIDGenerator().Generate()
 		msg.Src = m.memoryPort().AsRemote()
-		msg.Dst = m.comp.Spec().MemoryModule
+		msg.Dst = m.comp.Resources().MemoryMapper.Find(read.PAddr)
 		msg.TrafficClass = read.TrafficClass
 		msg.TrafficBytes = int(read.ByteSize)
 		m.pendingMemory = append(m.pendingMemory, pendingMemoryRead{
@@ -329,6 +330,15 @@ func (m *componentMiddleware) sendTranslationResponse() bool {
 		simdebug.TLBFill,
 		"rsp=%d req=%d va=0x%x pa=0x%x",
 		rsp.ID, rsp.RspTo, rsp.Page.VAddr, rsp.Page.PAddr)
+	simdebug.DPrintf(
+		simdebug.TLBReplay,
+		"release req=%d pid=%d va=0x%x pa=0x%x to-l2-tlb=%s",
+		rsp.RspTo,
+		rsp.Page.PID,
+		rsp.Page.VAddr,
+		rsp.Page.PAddr,
+		rsp.Dst,
+	)
 	return true
 }
 
@@ -458,8 +468,8 @@ func (c *Comp) Stats() Stats {
 
 // ValidateWiring checks the required downstream routes.
 func (c *Comp) ValidateWiring() error {
-	if c.Spec().MemoryModule == "" {
-		return fmt.Errorf("gmmu: MemoryModule is required")
+	if c.Resources().MemoryMapper == nil {
+		return fmt.Errorf("gmmu: MemoryMapper is required")
 	}
 	return nil
 }

@@ -3,7 +3,10 @@ package timingconfig
 import (
 	"testing"
 
+	"github.com/sarchlab/akita/v5/mem/cache/writethroughcache"
+	"github.com/sarchlab/akita/v5/mem/vm/addresstranslator"
 	"github.com/sarchlab/akita/v5/simulation"
+	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
 // buildPlatform assembles a platform of the given GPU type and count. The
@@ -52,4 +55,55 @@ func TestBuildR9NanoMultiGPUPlatform(t *testing.T) {
 
 func TestBuildMI300XPlatform(t *testing.T) {
 	buildPlatform(t, "mi300x", 1)
+}
+
+func TestDetailedTranslationUsesRadixAndPhysicalL1I(t *testing.T) {
+	s := simulation.MakeBuilder().
+		WithoutMonitoring().
+		WithOutputFileName(t.TempDir() + "/sim").
+		Build()
+	defer s.Terminate()
+
+	gpuDriver := MakeBuilder().
+		WithSimulation(s).
+		WithNumGPUs(1).
+		WithGPUType("mi300x").
+		Build()
+
+	table, ok := gpuDriver.Resources().PageTable.(*mgpuvm.RadixPageTable)
+	if !ok {
+		t.Fatalf("page table has type %T, want *vm.RadixPageTable",
+			gpuDriver.Resources().PageTable)
+	}
+	if table.Format != mgpuvm.X86FourLevel4KFormat() {
+		t.Fatalf("unexpected page-table format: %+v", table.Format)
+	}
+	if gpuDriver.Spec().Log2PageSize != 12 {
+		t.Fatalf("page size: got log2=%d, want 12", gpuDriver.Spec().Log2PageSize)
+	}
+	if s.GetComponentByName("GMMU") == nil {
+		t.Fatal("detailed GMMU must be registered")
+	}
+
+	atName := "GPU[1].SA[0].L1IAddrTrans"
+	at, ok := s.GetComponentByName(atName).(*addresstranslator.Comp)
+	if !ok {
+		t.Fatalf("component %s has unexpected type", atName)
+	}
+	if got := at.Resources().MemProviderMapper.Find(0x1_0000_0000); got !=
+		"GPU[1].SA[0].L1ICache.Top" {
+		t.Fatalf("L1I translator destination: got %s", got)
+	}
+
+	cacheName := "GPU[1].SA[0].L1ICache"
+	cache, ok := s.GetComponentByName(cacheName).(*writethroughcache.Comp)
+	if !ok {
+		t.Fatalf("component %s has unexpected type", cacheName)
+	}
+	cacheSpec := cache.Spec()
+	if cacheSpec.AddressMapperType != "interleaved" ||
+		len(cacheSpec.RemotePortNames) != 16 ||
+		cacheSpec.RemotePortNames[0] != "GPU[1].L2Cache[0].Top" {
+		t.Fatalf("physical L1I mapper: %+v", cacheSpec)
+	}
 }

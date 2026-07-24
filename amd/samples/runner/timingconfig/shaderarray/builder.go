@@ -15,6 +15,7 @@ import (
 	"github.com/sarchlab/akita/v5/simulation"
 	"github.com/sarchlab/akita/v5/timing"
 	"github.com/sarchlab/mgpusim/v5/amd/emu"
+	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cu"
 )
 
@@ -275,6 +276,7 @@ func (b *Builder) buildPort(
 		WithSpec(modeling.PortSpec{BufSize: bufSize}).
 		Build(name)
 	comp.AssignPort(name, port)
+	simdebug.TracePortRoutes(port)
 
 	return port
 }
@@ -294,8 +296,8 @@ func (b *Builder) buildComponents() {
 	b.buildL1SReorderBuffer()
 
 	b.buildL1ITLB()
-	b.buildL1IAddressTranslator()
 	b.buildL1ICache()
+	b.buildL1IAddressTranslator()
 	b.buildL1IReorderBuffer()
 
 	b.buildCUs()
@@ -365,9 +367,9 @@ func (b *Builder) connectInstMem() {
 	l1i := b.sa.L1ICache
 
 	b.connectWithDirectConnection(
-		robComp.GetPortByName("Bottom"), l1i.GetPortByName("Top"))
+		robComp.GetPortByName("Bottom"), atComp.GetPortByName("Top"))
 	b.connectWithDirectConnection(
-		l1i.GetPortByName("Bottom"), atComp.GetPortByName("Top"))
+		atComp.GetPortByName("Bottom"), l1i.GetPortByName("Top"))
 	b.connectWithDirectConnection(
 		atComp.GetPortByName("Translation"), tlbComp.GetPortByName("Top"))
 
@@ -693,13 +695,15 @@ func (b *Builder) buildL1SCache() {
 func (b *Builder) buildL1IReorderBuffer() {
 	name := fmt.Sprintf("%s.L1IROB", b.name)
 	b.sa.L1IROB = b.buildROB(name, 128, 4,
-		b.sa.L1ICache.GetPortByName("Top").AsRemote())
+		b.sa.L1IAT.GetPortByName("Top").AsRemote())
 }
 
 func (b *Builder) buildL1IAddressTranslator() {
 	name := fmt.Sprintf("%s.L1IAddrTrans", b.name)
 	b.sa.L1IAT = b.buildAT(name, 16,
-		b.l1AddressMapper,
+		&mem.SinglePortMapper{
+			Port: b.sa.L1ICache.GetPortByName("Top").AsRemote(),
+		},
 		&mem.SinglePortMapper{
 			Port: b.sa.L1ITLB.GetPortByName("Top").AsRemote(),
 		})
@@ -728,8 +732,5 @@ func (b *Builder) buildL1ICache() {
 	spec.DirLatency = 1
 
 	name := fmt.Sprintf("%s.L1ICache", b.name)
-	b.sa.L1ICache = b.buildL1Cache(name, spec,
-		&mem.SinglePortMapper{
-			Port: b.sa.L1IAT.GetPortByName("Top").AsRemote(),
-		})
+	b.sa.L1ICache = b.buildL1Cache(name, spec, b.l1AddressMapper)
 }

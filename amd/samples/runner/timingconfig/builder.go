@@ -6,7 +6,6 @@ import (
 
 	"github.com/sarchlab/akita/v5/mem"
 	"github.com/sarchlab/akita/v5/mem/vm"
-	"github.com/sarchlab/akita/v5/mem/vm/mmu"
 	"github.com/sarchlab/akita/v5/messaging"
 	"github.com/sarchlab/akita/v5/modeling"
 	"github.com/sarchlab/akita/v5/noc/directconnection"
@@ -16,6 +15,9 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/samples/runner/timingconfig/gpubuilder"
 	"github.com/sarchlab/mgpusim/v5/amd/samples/runner/timingconfig/mi300x"
 	"github.com/sarchlab/mgpusim/v5/amd/samples/runner/timingconfig/r9nano"
+	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
+	detailedgmmu "github.com/sarchlab/mgpusim/v5/amd/timing/gmmu"
+	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
 // Port buffer sizes. The driver port mirrors the emulation platform's
@@ -24,7 +26,9 @@ import (
 const (
 	driverGPUPortBufSize = 4096
 	mmuTopPortBufSize    = 4096
+	mmuMemoryPortBufSize = 128
 	ctrlPortBufSize      = 1
+	pageTableRegionSize  = 64 * mem.MB
 )
 
 // Builder builds a hardware platform for timing simulation.
@@ -45,6 +49,7 @@ type Builder struct {
 
 	globalStorage     *mem.Storage
 	rdmaAddressMapper *mem.BankedAddressPortMapper
+	gmmuMemoryMapper  *mem.InterleavedAddressPortMapper
 }
 
 // MakeBuilder creates a new Builder with default parameters.
@@ -97,7 +102,7 @@ func (b Builder) Build() *driver.Driver {
 	b.globalStorage = mem.NewStorage(
 		uint64(b.numGPUs)*b.gpuMemSize + b.cpuMemSize)
 
-	mmuComp, pageTable := b.createMMU()
+	mmuComp, pageTable := b.createGMMU()
 	gpuDriver := b.buildGPUDriver(pageTable)
 
 	gpuBuilder := b.createGPUBuilder(mmuComp, gpuDriver)
@@ -127,35 +132,46 @@ func (b *Builder) adjustConfigForGPUType() {
 		b.switchLatency = 15
 		b.d2hCycles = 150
 		b.h2dCycles = 250
-		// The ROCm/HIP runtime backs large device allocations with 2 MB
-		// huge pages, so a pointer chase over hundreds of MB stays
-		// TLB-resident and the latency curve is pure cache hierarchy (the
-		// real MI300X cache_latency shows no TLB wall). Modeling 4 KB pages
-		// would make the L1/L2 TLBs thrash at ~1 MB working sets and inject
-		// page-walk latency the hardware never pays. This sets the page size
-		// for the MMU/page table and every TLB consistently.
-		b.log2PageSize = 21 // 2 MB huge pages
+		b.log2PageSize = 12
 	default:
 		// Keep defaults for r9nano
 	}
 }
 
-func (b *Builder) createMMU() (*mmu.Comp, vm.PageTable) {
-	pageTable := vm.NewPageTable(b.log2PageSize)
+func (b *Builder) createGMMU() (*detailedgmmu.Comp, *mgpuvm.RadixPageTable) {
+	format := mgpuvm.X86FourLevel4KFormat()
+	shadow := vm.NewPageTable(b.log2PageSize)
+	tableRegionBase := b.cpuMemSize + b.gpuMemSize - pageTableRegionSize
+	tableAllocator := mgpuvm.NewLinearTablePageAllocator(
+		tableRegionBase, pageTableRegionSize)
+	pageTable, err := mgpuvm.NewRadixPageTable(
+		format, tableAllocator, b.globalStorage, shadow)
+	if err != nil {
+		panic(err)
+	}
 
-	spec := mmu.DefaultSpec()
-	spec.Freq = 1 * timing.GHz
-	spec.Latency = 100 // v4: page walking latency
-	spec.Log2PageSize = b.log2PageSize
+	b.gmmuMemoryMapper = mem.NewInterleavedAddressPortMapper(128)
+	b.gmmuMemoryMapper.LowAddress = b.cpuMemSize
+	b.gmmuMemoryMapper.HighAddress = b.cpuMemSize + b.gpuMemSize
+	b.gmmuMemoryMapper.UseAddressSpaceLimitation = true
 
-	mmuComponent := mmu.MakeBuilder().
+	spec := detailedgmmu.Spec{Freq: 1 * timing.GHz}
+	walkerConfig := detailedgmmu.DefaultConfig()
+	walkerConfig.Format = format
+	mmuComponent := detailedgmmu.MakeBuilder().
 		WithRegistrar(b.simulation).
 		WithSpec(spec).
-		WithResources(mmu.Resources{PageTable: pageTable}).
-		Build("MMU")
+		WithResources(detailedgmmu.Resources{
+			PageTable:    pageTable,
+			WalkerConfig: walkerConfig,
+			MemoryMapper: b.gmmuMemoryMapper,
+		}).
+		Build("GMMU")
 
-	b.buildPort(mmuComponent, "Top", mmuTopPortBufSize)
-	b.buildPort(mmuComponent, "Control", ctrlPortBufSize)
+	b.buildPort(mmuComponent, detailedgmmu.TopPortName, mmuTopPortBufSize)
+	b.buildPort(mmuComponent, detailedgmmu.MemoryPortName, mmuMemoryPortBufSize)
+	b.buildPort(mmuComponent, detailedgmmu.ControlPortName, ctrlPortBufSize)
+	b.buildPort(mmuComponent, detailedgmmu.FaultPortName, ctrlPortBufSize)
 
 	return mmuComponent, pageTable
 }
@@ -168,6 +184,7 @@ func (b *Builder) buildGPUDriver(
 	spec.UseMagicMemoryCopy = b.useMagicMemoryCopy
 	spec.D2HCycles = b.d2hCycles
 	spec.H2DCycles = b.h2dCycles
+	spec.ReservedPageTableBytes = pageTableRegionSize
 
 	gpuDriver := driver.MakeBuilder().
 		WithRegistrar(b.simulation).
@@ -201,12 +218,13 @@ func (b *Builder) buildPort(
 		WithSpec(modeling.PortSpec{BufSize: bufSize}).
 		Build(name)
 	comp.AssignPort(name, port)
+	simdebug.TracePortRoutes(port)
 
 	return port
 }
 
 func (b *Builder) createGPUBuilder(
-	mmuComponent *mmu.Comp,
+	mmuComponent *detailedgmmu.Comp,
 	gpuDriver *driver.Driver,
 ) gpubuilder.GPUBuilder {
 	b.createRDMAAddressMapper()
@@ -218,6 +236,7 @@ func (b *Builder) createGPUBuilder(
 		return mi300x.MakeBuilder().
 			WithSimulation(b.simulation).
 			WithMMU(mmuComponent).
+			WithGMMUMemoryMapper(b.gmmuMemoryMapper).
 			WithLog2PageSize(b.log2PageSize).
 			WithGlobalStorage(b.globalStorage).
 			WithDriverPort(driverPort)
@@ -225,6 +244,7 @@ func (b *Builder) createGPUBuilder(
 		return r9nano.MakeBuilder().
 			WithSimulation(b.simulation).
 			WithMMU(mmuComponent).
+			WithGMMUMemoryMapper(b.gmmuMemoryMapper).
 			WithLog2PageSize(b.log2PageSize).
 			WithGlobalStorage(b.globalStorage).
 			WithDriverPort(driverPort)
@@ -252,7 +272,7 @@ func (b *Builder) createGPUs(
 // delivers real messages but does not model PCIe/switch latency.
 func (b *Builder) createConnection(
 	gpuDriver *driver.Driver,
-	mmuComponent *mmu.Comp,
+	mmuComponent *detailedgmmu.Comp,
 ) *directconnection.Comp {
 	conn := directconnection.MakeBuilder().
 		WithRegistrar(b.simulation).
@@ -260,7 +280,7 @@ func (b *Builder) createConnection(
 		Build("InterDeviceConn")
 
 	conn.PlugIn(gpuDriver.GetPortByName(driver.GPUPortName))
-	conn.PlugIn(mmuComponent.GetPortByName("Top"))
+	conn.PlugIn(mmuComponent.GetPortByName(detailedgmmu.TopPortName))
 
 	return conn
 }

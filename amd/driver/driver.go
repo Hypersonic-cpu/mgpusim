@@ -198,7 +198,11 @@ func (d *Driver) RegisterGPU(
 			DRAMSize: properties.DRAMSize,
 		},
 	}
-	gpuDevice.SetTotalMemSize(properties.DRAMSize)
+	if d.Spec().ReservedPageTableBytes >= properties.DRAMSize {
+		panic("driver: page-table reservation consumes GPU memory")
+	}
+	gpuDevice.SetTotalMemSize(
+		properties.DRAMSize - d.Spec().ReservedPageTableBytes)
 	d.memAllocator.RegisterDevice(gpuDevice)
 
 	d.devices = append(d.devices, gpuDevice)

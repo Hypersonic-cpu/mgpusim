@@ -29,6 +29,10 @@ type Spec struct {
 	// memory copy command.
 	D2HCycles int `json:"d2h_cycles"`
 	H2DCycles int `json:"h2d_cycles"`
+
+	// ReservedPageTableBytes excludes a page-table-only region from the end
+	// of each GPU's data-page allocation range.
+	ReservedPageTableBytes uint64 `json:"reserved_page_table_bytes"`
 }
 
 // State contains the mutable runtime data of the driver.

@@ -9,7 +9,6 @@ import (
 	"github.com/sarchlab/akita/v5/mem/cache/writeback"
 	"github.com/sarchlab/akita/v5/mem/cache/writethroughcache"
 	"github.com/sarchlab/akita/v5/mem/simplebankedmemory"
-	"github.com/sarchlab/akita/v5/mem/vm/mmu"
 	"github.com/sarchlab/akita/v5/mem/vm/tlb"
 	"github.com/sarchlab/akita/v5/messaging"
 	"github.com/sarchlab/akita/v5/modeling"
@@ -21,8 +20,10 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/insts"
 	"github.com/sarchlab/mgpusim/v5/amd/samples/runner/timingconfig/gpubuilder"
 	"github.com/sarchlab/mgpusim/v5/amd/samples/runner/timingconfig/shaderarray"
+	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cp"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cu"
+	detailedgmmu "github.com/sarchlab/mgpusim/v5/amd/timing/gmmu"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/rdma"
 )
 
@@ -88,7 +89,8 @@ type Builder struct {
 	memAddrOffset                  uint64
 	dramSize                       uint64
 	globalStorage                  *mem.Storage
-	mmu                            *mmu.Comp
+	mmu                            *detailedgmmu.Comp
+	gmmuMemoryMapper               *mem.InterleavedAddressPortMapper
 	rdmaAddressMapper              mem.AddressToPortMapper
 	driverPort                     messaging.RemotePort
 
@@ -239,8 +241,16 @@ func (b Builder) WithDramSize(size uint64) Builder {
 }
 
 // WithMMU sets the MMU that can provide the ultimate address translation.
-func (b Builder) WithMMU(mmu *mmu.Comp) Builder {
+func (b Builder) WithMMU(mmu *detailedgmmu.Comp) Builder {
 	b.mmu = mmu
+	return b
+}
+
+// WithGMMUMemoryMapper shares the physical L2-bank mapper with the GMMU.
+func (b Builder) WithGMMUMemoryMapper(
+	mapper *mem.InterleavedAddressPortMapper,
+) Builder {
+	b.gmmuMemoryMapper = mapper
 	return b
 }
 
@@ -316,6 +326,7 @@ func (b *Builder) buildPort(
 		WithSpec(modeling.PortSpec{BufSize: bufSize}).
 		Build(name)
 	comp.AssignPort(name, port)
+	simdebug.TracePortRoutes(port)
 
 	return port
 }
@@ -485,6 +496,10 @@ func (b *Builder) connectL1ToL2() {
 	for _, l2 := range b.l2Caches {
 		l1ToL2Conn.PlugIn(l2.GetPortByName("Top"))
 	}
+	if b.gpuID == 1 {
+		l1ToL2Conn.PlugIn(
+			b.mmu.GetPortByName(detailedgmmu.MemoryPortName))
+	}
 
 	for _, sa := range b.sas {
 		for i := range b.numCUPerShaderArray {
@@ -492,9 +507,7 @@ func (b *Builder) connectL1ToL2() {
 		}
 
 		l1ToL2Conn.PlugIn(sa.L1SCache.GetPortByName("Bottom"))
-		// The instruction path egress to L2 is the L1I address translator's
-		// bottom port (the L1I cache sits above its AT).
-		l1ToL2Conn.PlugIn(sa.L1IAT.GetPortByName("Bottom"))
+		l1ToL2Conn.PlugIn(sa.L1ICache.GetPortByName("Bottom"))
 	}
 }
 
@@ -642,6 +655,12 @@ func (b *Builder) buildL2Caches() {
 			b.l1AddressMapper.LowModules,
 			l2.GetPortByName("Top").AsRemote(),
 		)
+		if b.gpuID == 1 {
+			b.gmmuMemoryMapper.LowModules = append(
+				b.gmmuMemoryMapper.LowModules,
+				l2.GetPortByName("Top").AsRemote(),
+			)
+		}
 	}
 }
 
@@ -844,7 +863,7 @@ func (b *Builder) buildL2TLB() {
 		WithSpec(spec).
 		WithResources(tlb.Resources{
 			TranslationProviderMapper: &mem.SinglePortMapper{
-				Port: b.mmu.GetPortByName("Top").AsRemote(),
+				Port: b.mmu.GetPortByName(detailedgmmu.TopPortName).AsRemote(),
 			},
 		}).
 		Build(fmt.Sprintf("%s.L2TLB", b.name))

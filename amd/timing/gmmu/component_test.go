@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/sarchlab/akita/v5/hooking"
+	"github.com/sarchlab/akita/v5/mem"
 	"github.com/sarchlab/akita/v5/mem/memcontrolprotocol"
 	"github.com/sarchlab/akita/v5/mem/memprotocol"
 	"github.com/sarchlab/akita/v5/mem/vm/vmprotocol"
@@ -36,14 +37,17 @@ func makeComponent(t *testing.T) (*Comp, map[string]messaging.Port) {
 	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
 	registrar := modeling.NewStandaloneRegistrar(timing.NewSerialEngine())
 	spec := Spec{
-		Freq:         1 * timing.GHz,
-		MemoryModule: "L2.Top",
-		FaultModule:  "FaultSink.Top",
+		Freq:        1 * timing.GHz,
+		FaultModule: "FaultSink.Top",
 	}
 	comp := MakeBuilder().
 		WithRegistrar(registrar).
 		WithSpec(spec).
-		WithResources(Resources{PageTable: table, WalkerConfig: core.Config}).
+		WithResources(Resources{
+			PageTable:    table,
+			WalkerConfig: core.Config,
+			MemoryMapper: &mem.SinglePortMapper{Port: "L2.Top"},
+		}).
 		Build("GMMU")
 
 	ports := make(map[string]messaging.Port)
