@@ -289,10 +289,10 @@ def run_one(
     metrics_path = metric_database(directory)
     stdout_path = directory / "stdout.log"
     stderr_path = directory / "stderr.log"
+    built_from = binary_commit(workload.name)
 
     if not force and status_path.exists():
         status = json.loads(status_path.read_text())
-        built_from = binary_commit(workload.name)
         reusable = status.get("git_commit") == built_from
         complete = status.get("status") != "PASS" or metrics_path.exists()
         if reusable and complete:
@@ -373,7 +373,7 @@ def run_one(
         "rss_watchdog_bytes": RSS_LIMIT_BYTES,
         "rss_sampling_seconds": RSS_INTERVAL_SECONDS,
         "command": command,
-        "git_commit": binary_commit(workload.name),
+        "git_commit": built_from,
         "metrics": str(metrics_path.relative_to(ROOT)),
         "stdout": str(stdout_path.relative_to(ROOT)),
         "stderr": str(stderr_path.relative_to(ROOT)),
