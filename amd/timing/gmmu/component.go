@@ -239,6 +239,7 @@ func (m *componentMiddleware) receiveTranslationRequest() bool {
 	return true
 }
 
+//nolint:funlen // Translation, fault, and physical-read drains share ordering.
 func (m *componentMiddleware) collectCoreOutput() bool {
 	progress := false
 	for _, read := range m.comp.Core.DrainMemoryReads() {
