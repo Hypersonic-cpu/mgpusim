@@ -22,6 +22,7 @@ type VectorMemAccessInfo struct {
 	Wavefront *wavefront.Wavefront
 	Inst      *wavefront.Inst
 	laneInfo  []vectorMemAccessLaneInfo
+	laneMask  uint64
 }
 
 // InstFetchReqInfo defines request info

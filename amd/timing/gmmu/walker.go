@@ -50,6 +50,8 @@ type WalkRequest struct {
 	VAddr    uint64
 	DeviceID uint64
 	Access   AccessType
+	Group    latpc.GroupMember
+	HasGroup bool
 }
 
 // MemoryRead is an 8-byte physical PTE/PDE read emitted by a walker.

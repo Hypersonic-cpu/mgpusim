@@ -310,6 +310,24 @@ func (b *Builder) buildComponents() {
 	b.buildL1IReorderBuffer()
 
 	b.buildCUs()
+
+	if b.translationConfig.Mode.Mechanisms().Detector {
+		b.attachTranslationMetadataBridges()
+	}
+}
+
+func (b *Builder) attachTranslationMetadataBridges() {
+	for i := range b.numCUs {
+		latpc.AttachMetadataBridge(b.sa.L1VROBs[i])
+		latpc.AttachMetadataBridge(b.sa.L1VATs[i])
+		latpc.AttachMetadataBridge(b.sa.L1VTLBs[i])
+	}
+	latpc.AttachMetadataBridge(b.sa.L1SROB)
+	latpc.AttachMetadataBridge(b.sa.L1SAT)
+	latpc.AttachMetadataBridge(b.sa.L1STLB)
+	latpc.AttachMetadataBridge(b.sa.L1IROB)
+	latpc.AttachMetadataBridge(b.sa.L1IAT)
+	latpc.AttachMetadataBridge(b.sa.L1ITLB)
 }
 
 func (b *Builder) connectComponents() {
@@ -448,6 +466,8 @@ func (b *Builder) cuSpec() cu.Spec {
 	}
 
 	spec.RegisterScoreboard = b.registerScoreboard
+	spec.PreserveTranslationGroups =
+		b.translationConfig.Mode.Mechanisms().Detector
 
 	return spec
 }

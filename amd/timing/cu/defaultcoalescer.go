@@ -121,6 +121,7 @@ func (c defaultCoalescer) generateWriteTransactions(
 			Inst:      wf.DynamicInst(),
 		}
 
+		c.addLaneMask(&transaction, wf)
 		transactions = append(transactions, transaction)
 	}
 	return transactions
@@ -227,6 +228,29 @@ func (c defaultCoalescer) addLaneInfo(
 				}
 				transaction.laneInfo = append(
 					transaction.laneInfo, laneInfo)
+				transaction.laneMask |= uint64(1) << i
+			}
+		}
+	}
+}
+
+func (c defaultCoalescer) addLaneMask(
+	transaction *VectorMemAccessInfo,
+	wf *wavefront.Wavefront,
+) {
+	exec := wf.EXEC()
+	regCount := c.instRegCount(wf.Inst())
+	reqAddress := transaction.Write.Address
+
+	for i := uint(0); i < 64; i++ {
+		if !laneMasked(exec, i) {
+			continue
+		}
+		for j := 0; j < regCount; j++ {
+			addr := c.readFlatAddr(wf, int(i)) + uint64(j*4)
+			if c.isInSameCacheLine(addr, reqAddress) {
+				transaction.laneMask |= uint64(1) << i
+				break
 			}
 		}
 	}

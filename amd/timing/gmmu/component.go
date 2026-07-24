@@ -13,6 +13,7 @@ import (
 	"github.com/sarchlab/akita/v5/modeling"
 	"github.com/sarchlab/akita/v5/timing"
 	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
@@ -220,9 +221,14 @@ func (m *componentMiddleware) receiveTranslationRequest() bool {
 	}
 	m.topPort().RetrieveIncoming()
 	m.topRequests[req.ID] = req
-	err := m.comp.Core.SubmitAt(WalkRequest{
+	walkReq := WalkRequest{
 		ID: req.ID, PID: req.PID, VAddr: req.VAddr, DeviceID: req.DeviceID,
-	}, m.comp.CurrentTime())
+	}
+	if group, found := latpc.RequestMetadata(req.ID); found {
+		walkReq.Group = group
+		walkReq.HasGroup = true
+	}
+	err := m.comp.Core.SubmitAt(walkReq, m.comp.CurrentTime())
 	if err != nil {
 		panic(err)
 	}
@@ -254,6 +260,7 @@ func (m *componentMiddleware) collectCoreOutput() bool {
 		progress = true
 	}
 	for _, translation := range m.comp.Core.DrainTranslations() {
+		latpc.ReleaseRequestMetadata(translation.RequestID)
 		req, ok := m.topRequests[translation.RequestID]
 		if !ok {
 			continue
@@ -273,6 +280,7 @@ func (m *componentMiddleware) collectCoreOutput() bool {
 		progress = true
 	}
 	for _, fault := range m.comp.Core.DrainFaults() {
+		latpc.ReleaseRequestMetadata(fault.RequestID)
 		req := m.topRequests[fault.RequestID]
 		delete(m.topRequests, fault.RequestID)
 		if m.comp.Spec().FaultModule == "" {

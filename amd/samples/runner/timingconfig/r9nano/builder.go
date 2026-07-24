@@ -727,6 +727,9 @@ func (b *Builder) buildL2TLB() {
 			},
 		}).
 		Build(fmt.Sprintf("%s.L2TLB", b.name))
+	if b.translationConfig.Mode.Mechanisms().Detector {
+		latpc.AttachMetadataBridge(l2TLB)
+	}
 
 	b.buildPort(l2TLB, "Top", l2TLBPortBufSize)
 	b.buildPort(l2TLB, "Bottom", l2TLBPortBufSize)

@@ -8,6 +8,7 @@ import (
 	"github.com/sarchlab/akita/v5/timing"
 	"github.com/sarchlab/akita/v5/tracing"
 	"github.com/sarchlab/mgpusim/v5/amd/insts"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/wavefront"
 )
 
@@ -26,8 +27,9 @@ type VectorMemoryUnit struct {
 	numTransactionInFlight  uint64
 	maxInstructionsInFlight uint64
 
-	maxCoalescingPenalty     int
-	coalescingStallRemaining int
+	maxCoalescingPenalty      int
+	coalescingStallRemaining  int
+	preserveTranslationGroups bool
 
 	instructionPipeline           queueing.Pipeline[vectorMemInst]
 	postInstructionPipelineBuffer queueing.Buffer[vectorMemInst]
@@ -251,6 +253,7 @@ func (u *VectorMemoryUnit) executeFlatLoad(
 		u.cu.InFlightVectorMemAccessLimit {
 		return false
 	}
+	u.registerTranslationGroup(transactions)
 
 	// The in-flight vector-memory-access budget admitted this instruction's
 	// transactions: mark the resolution of any wait for a free slot, then open
@@ -301,6 +304,7 @@ func (u *VectorMemoryUnit) executeFlatStore(
 		u.cu.InFlightVectorMemAccessLimit {
 		return false
 	}
+	u.registerTranslationGroup(transactions)
 
 	// The in-flight vector-memory-access budget admitted this instruction's
 	// transactions: mark the resolution of any wait for a free slot, then open
@@ -330,6 +334,31 @@ func (u *VectorMemoryUnit) executeFlatStore(
 	}
 
 	return true
+}
+
+func (u *VectorMemoryUnit) registerTranslationGroup(
+	transactions []VectorMemAccessInfo,
+) {
+	if !u.preserveTranslationGroups || len(transactions) == 0 {
+		return
+	}
+	count := uint16(len(transactions))
+	for i := range transactions {
+		transaction := &transactions[i]
+		member := latpc.GroupMember{
+			InstructionID: transaction.Inst.ID,
+			Position:      uint16(i),
+			Count:         count,
+			LaneMask:      transaction.laneMask,
+		}
+		if transaction.Read != nil {
+			member.VAddr = transaction.Read.Address
+			latpc.RegisterRequestMetadata(transaction.Read.ID, member)
+		} else {
+			member.VAddr = transaction.Write.Address
+			latpc.RegisterRequestMetadata(transaction.Write.ID, member)
+		}
+	}
 }
 
 func (u *VectorMemoryUnit) sendRequest() bool {

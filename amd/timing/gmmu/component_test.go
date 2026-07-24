@@ -11,6 +11,7 @@ import (
 	"github.com/sarchlab/akita/v5/messaging"
 	"github.com/sarchlab/akita/v5/modeling"
 	"github.com/sarchlab/akita/v5/timing"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
@@ -251,5 +252,34 @@ func TestComponentControlResetDropsStaleMemoryResponses(t *testing.T) {
 	}
 	if !comp.Core.IsDrained() {
 		t.Fatal("reset core retained work")
+	}
+}
+
+func TestComponentPreservesTranslationGroupMetadata(t *testing.T) {
+	comp, ports := makeComponent(t)
+	mapPage(comp.Resources().PageTable, 1, 0x4000, 0x2000_0000)
+	req := vmprotocol.TranslationReq{VAddr: 0x4000, PID: 1}
+	req.ID = timing.GetIDGenerator().Generate()
+	req.Src = "L2TLB.Bottom"
+	req.Dst = ports[TopPortName].AsRemote()
+	member := latpc.GroupMember{
+		InstructionID: 77,
+		Position:      3,
+		Count:         8,
+		VAddr:         0x4000,
+		LaneMask:      0xff,
+	}
+	latpc.RegisterRequestMetadata(req.ID, member)
+	ports[TopPortName].Deliver(req)
+
+	middleware := comp.Middlewares()[0].(*componentMiddleware)
+	if !middleware.receiveTranslationRequest() {
+		t.Fatal("translation request was not admitted")
+	}
+	if !comp.Core.Walkers[0].Busy ||
+		!comp.Core.Walkers[0].Req.HasGroup ||
+		comp.Core.Walkers[0].Req.Group != member {
+		t.Fatalf("group metadata did not reach walker: %+v",
+			comp.Core.Walkers[0].Req)
 	}
 }

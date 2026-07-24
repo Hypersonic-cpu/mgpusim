@@ -219,6 +219,7 @@ func (b *Builder) equipVectorMemoryUnit(cu *ComputeUnit, name string) {
 	}
 	vectorMemoryUnit := NewVectorMemoryUnit(cu, coalescer)
 	vectorMemoryUnit.maxCoalescingPenalty = b.spec.MaxCoalescingPenalty
+	vectorMemoryUnit.preserveTranslationGroups = b.spec.PreserveTranslationGroups
 	cu.VectorMemUnit = vectorMemoryUnit
 
 	vectorMemoryUnit.postInstructionPipelineBuffer =

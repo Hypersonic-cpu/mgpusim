@@ -109,6 +109,7 @@ func (b Builder) WithTranslationSelection(mode, profile string) Builder {
 // Build builds the hardware platform and returns the driver. The driver, the
 // GPUs, and all the connections register themselves with the simulation.
 func (b Builder) Build() *driver.Driver {
+	latpc.ResetRuntimeMetadata()
 	b.adjustConfigForGPUType()
 	b.cpuGPUMemSizeMustEqual()
 

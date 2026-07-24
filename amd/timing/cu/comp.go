@@ -86,6 +86,9 @@ type Spec struct {
 	// feature.
 	RegisterScoreboard bool `json:"register_scoreboard"`
 
+	// PreserveTranslationGroups enables the detector sidecar metadata path.
+	PreserveTranslationGroups bool `json:"preserve_translation_groups"`
+
 	// InFlightVectorMemAccessLimit caps the number of outstanding vector
 	// memory transactions.
 	InFlightVectorMemAccessLimit int `json:"in_flight_vector_mem_access_limit"`
