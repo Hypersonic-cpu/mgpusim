@@ -24,6 +24,7 @@ func TestMetadataRegistryMovesWithoutLeakingParent(t *testing.T) {
 	if _, ok := registry.Get(10); ok {
 		t.Fatal("parent metadata leaked")
 	}
+	member.RequestID = 11
 	if got, ok := registry.Get(11); !ok || got != member {
 		t.Fatalf("child metadata: got %+v, %t", got, ok)
 	}
@@ -48,6 +49,7 @@ func TestMetadataBridgeFollowsRequestTaskChain(t *testing.T) {
 		},
 	})
 
+	member.RequestID = 300
 	if got, ok := registry.Get(300); !ok || got != member {
 		t.Fatalf("metadata did not reach child request: %+v, %t", got, ok)
 	}

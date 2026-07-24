@@ -111,6 +111,7 @@ func (b Builder) WithTranslationSelection(mode, profile string) Builder {
 func (b Builder) Build() *driver.Driver {
 	latpc.ResetRuntimeMetadata()
 	latpc.ResetRuntimeDetector(mgpuvm.X86FourLevel4KFormat())
+	latpc.ResetLATCRegistry()
 	b.adjustConfigForGPUType()
 	b.cpuGPUMemSizeMustEqual()
 

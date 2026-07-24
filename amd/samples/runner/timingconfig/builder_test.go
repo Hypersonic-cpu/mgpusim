@@ -92,8 +92,13 @@ func TestTranslationSelectionReachesBuiltResources(t *testing.T) {
 		t.Fatalf("component %s has unexpected type", l1Name)
 	}
 	if l1.Spec().NumSets*l1.Spec().NumWays != 64 ||
-		l1.Spec().MSHRSize != 16 || l1.Spec().Log2PageSize != 12 {
+		l1.Spec().MSHRSize != 16*64 || l1.Spec().Log2PageSize != 12 {
 		t.Fatalf("unexpected L1 TLB spec: %+v", l1.Spec())
+	}
+	latcComponents := latpc.LATCComponents()
+	if len(latcComponents) == 0 ||
+		latcComponents[0].Spec().MSHRSize != 16 {
+		t.Fatalf("LATC does not own the logical 16-entry capacity")
 	}
 
 	l2Name := "GPU[1].L2TLB"

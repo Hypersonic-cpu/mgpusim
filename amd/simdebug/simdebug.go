@@ -35,6 +35,8 @@ const (
 	Fault Flag = "Fault"
 	// LATPCDetector reports bounded regularity-detector decisions.
 	LATPCDetector Flag = "LATPCDetector"
+	// LATC reports compressed L1-TLB MSHR allocation and release.
+	LATC Flag = "LATC"
 )
 
 var (
@@ -48,6 +50,7 @@ var knownFlags = map[Flag]struct{}{
 	VMMap: {}, PageTable: {}, GMMUWalk: {}, PWC: {}, PTWMem: {}, MemRoute: {},
 	TLBReplay: {}, TLBFill: {}, Fault: {},
 	LATPCDetector: {},
+	LATC:          {},
 }
 
 // Config controls debug-log categories and destination. Exactly one of Writer

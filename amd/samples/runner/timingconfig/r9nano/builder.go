@@ -360,6 +360,9 @@ func (b *Builder) connectCPWithTLBs() {
 	for _, sa := range b.sas {
 		for i := range b.numCUPerShaderArray {
 			addTLB(sa.L1VTLBs[i])
+			if len(sa.L1VLATCs) > 0 {
+				addTLB(sa.L1VLATCs[i])
+			}
 		}
 
 		addTLB(sa.L1STLB)

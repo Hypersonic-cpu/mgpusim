@@ -18,6 +18,7 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cu"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
+	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
 // Port buffer sizes. The CU port sizes mirror the v4 CU builder; the other
@@ -46,6 +47,7 @@ type ShaderArray struct {
 	L1VATs    []*addresstranslator.Comp
 	L1VCaches []*writethroughcache.Comp
 	L1VTLBs   []*tlb.Comp
+	L1VLATCs  []*latpc.LATCComp
 
 	L1SROB   *rob.Comp
 	L1SAT    *addresstranslator.Comp
@@ -296,6 +298,9 @@ func (b *Builder) buildPort(
 func (b *Builder) buildComponents() {
 	b.buildL1VCaches()
 	b.buildL1VTLBs()
+	if b.translationConfig.Mode.Mechanisms().LATC {
+		b.buildL1VLATCs()
+	}
 	b.buildL1VAddressTranslators()
 	b.buildL1VReorderBuffers()
 
@@ -353,11 +358,28 @@ func (b *Builder) connectVectorMem() {
 			robComp.GetPortByName("Bottom"), atComp.GetPortByName("Top"))
 
 		b.connectWithDirectConnection(
-			atComp.GetPortByName("Translation"), tlbComp.GetPortByName("Top"))
+			atComp.GetPortByName("Translation"),
+			b.vectorTranslationTopPort(i, tlbComp))
+
+		if len(b.sa.L1VLATCs) > 0 {
+			b.connectWithDirectConnection(
+				b.sa.L1VLATCs[i].GetPortByName(latpc.LATCBottomPortName),
+				tlbComp.GetPortByName("Top"))
+		}
 
 		b.connectWithDirectConnection(
 			l1v.GetPortByName("Top"), atComp.GetPortByName("Bottom"))
 	}
+}
+
+func (b *Builder) vectorTranslationTopPort(
+	index int,
+	tlbComp *tlb.Comp,
+) messaging.Port {
+	if len(b.sa.L1VLATCs) > 0 {
+		return b.sa.L1VLATCs[index].GetPortByName(latpc.LATCTopPortName)
+	}
+	return tlbComp.GetPortByName("Top")
 }
 
 func (b *Builder) connectScalarMem() {
@@ -577,7 +599,8 @@ func (b *Builder) buildL1VAddressTranslators() {
 				Port: b.sa.L1VCaches[i].GetPortByName("Top").AsRemote(),
 			},
 			&mem.SinglePortMapper{
-				Port: b.sa.L1VTLBs[i].GetPortByName("Top").AsRemote(),
+				Port: b.vectorTranslationTopPort(
+					i, b.sa.L1VTLBs[i]).AsRemote(),
 			})
 		b.sa.L1VATs = append(b.sa.L1VATs, at)
 	}
@@ -615,6 +638,12 @@ func (b *Builder) buildTLB(
 
 func (b *Builder) buildL1VTLBs() {
 	resources := b.translationConfig.Resources
+	mshrEntries := resources.L1TLBMSHRs
+	if b.translationConfig.Mode.Mechanisms().LATC {
+		// LATC owns the logical capacity and backpressure. The backing TLB
+		// needs enough physical member slots to materialize compressed groups.
+		mshrEntries *= 64
+	}
 	for i := 0; i < b.numCUs; i++ {
 		name := fmt.Sprintf("%s.L1VTLB[%d]", b.name, i)
 		// v4 used a 1-cycle TLB. The v5 TLB inserts requests into its
@@ -624,9 +653,35 @@ func (b *Builder) buildL1VTLBs() {
 		// v5.0.0-beta.2 queueing.Pipeline), so the request deadlocks.
 		// Latency=2 is the minimum functional value.
 		tlbComp := b.buildTLB(
-			name, 1, resources.L1TLBEntries, resources.L1TLBMSHRs,
+			name, 1, resources.L1TLBEntries, mshrEntries,
 			resources.L1TLBPorts, resources.L1TLBLatency)
 		b.sa.L1VTLBs = append(b.sa.L1VTLBs, tlbComp)
+	}
+}
+
+func (b *Builder) buildL1VLATCs() {
+	resources := b.translationConfig.Resources
+	spec := latpc.LATCSpec{
+		Freq:           b.freq,
+		MSHRSize:       resources.L1TLBMSHRs,
+		NumReqPerCycle: resources.L1TLBPorts,
+	}
+	for i := range b.numCUs {
+		name := fmt.Sprintf("%s.L1VLATC[%d]", b.name, i)
+		component := latpc.MakeLATCBuilder().
+			WithRegistrar(b.simulation).
+			WithSpec(spec).
+			WithResources(latpc.LATCResources{
+				TranslationProviderMapper: &mem.SinglePortMapper{
+					Port: b.sa.L1VTLBs[i].GetPortByName("Top").AsRemote(),
+				},
+				Format: mgpuvm.X86FourLevel4KFormat(),
+			}).
+			Build(name)
+		b.buildPort(component, latpc.LATCTopPortName, resources.L1TLBPorts)
+		b.buildPort(component, latpc.LATCBottomPortName, resources.L1TLBPorts)
+		b.buildPort(component, latpc.LATCControlPortName, ctrlPortBufSize)
+		b.sa.L1VLATCs = append(b.sa.L1VLATCs, component)
 	}
 }
 

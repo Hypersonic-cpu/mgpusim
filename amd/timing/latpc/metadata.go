@@ -62,6 +62,7 @@ func (r *MetadataRegistry) Move(parentID, childID uint64) bool {
 		return false
 	}
 	delete(r.members, parentID)
+	member.RequestID = childID
 	r.members[childID] = member
 	return true
 }
