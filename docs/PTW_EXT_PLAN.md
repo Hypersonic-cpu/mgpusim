@@ -1516,6 +1516,10 @@ Update rules:
   - Use one GPU, CDNA3, MI300X timing mode, verification, and a 12 GiB limit.
   - Record simulated kernel time, cycles where available, host wall time, RSS, TLB metrics, walk metrics, PWC rates, and PTW memory behavior.
   - Evidence: `out/ptw-latpc/timing/report.md`
+  - Corrected timing sweep: all seven requested workloads, including BFS and
+    FDTD2D, pass on CDNA3/MI300X with `page_size_bytes=4096`.
+  - Corrected raw evidence: `out/ptw-latpc/timing-rerun/`
+  - PTE coherence fix: `31f0b520`
 
 ## Final completion status
 
