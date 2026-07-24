@@ -3,6 +3,7 @@ package gmmu
 import (
 	"fmt"
 	"log"
+	"sync"
 
 	"github.com/sarchlab/akita/v5/mem"
 	"github.com/sarchlab/akita/v5/mem/memcontrolprotocol"
@@ -14,6 +15,8 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
+
+var registeredComps sync.Map // map[string]*Comp, keyed by component name.
 
 const (
 	// TopPortName accepts L2-TLB translation misses.
@@ -129,7 +132,21 @@ func (b Builder) Build(name string) *Comp {
 	comp := &Comp{Component: modelComp, Core: core}
 	modelComp.AddMiddleware(newComponentMiddleware(comp))
 	b.registrar.RegisterComponent(modelComp)
+	registeredComps.Store(name, comp)
 	return comp
+}
+
+// Lookup returns the detailed GMMU wrapper registered under name. Modeling
+// registers the embedded generic component, so reporters use this lookup to
+// obtain the wrapper's walker statistics without changing the framework's
+// component ownership model.
+func Lookup(name string) (*Comp, bool) {
+	value, ok := registeredComps.Load(name)
+	if !ok {
+		return nil, false
+	}
+	comp, ok := value.(*Comp)
+	return comp, ok
 }
 
 type pendingMemoryRead struct {
@@ -156,6 +173,7 @@ func newComponentMiddleware(comp *Comp) *componentMiddleware {
 }
 
 func (m *componentMiddleware) Tick() bool {
+	m.comp.Core.AdvanceTime(m.comp.CurrentTime())
 	progress := m.handleControl()
 	if m.comp.State.ControlState == memcontrolprotocol.StatePaused {
 		return progress
@@ -202,9 +220,9 @@ func (m *componentMiddleware) receiveTranslationRequest() bool {
 	}
 	m.topPort().RetrieveIncoming()
 	m.topRequests[req.ID] = req
-	err := m.comp.Core.Submit(WalkRequest{
+	err := m.comp.Core.SubmitAt(WalkRequest{
 		ID: req.ID, PID: req.PID, VAddr: req.VAddr, DeviceID: req.DeviceID,
-	})
+	}, m.comp.CurrentTime())
 	if err != nil {
 		panic(err)
 	}
@@ -309,7 +327,8 @@ func (m *componentMiddleware) receiveMemoryResponse() bool {
 		return true
 	}
 	delete(m.memoryRequestIDs, rsp.RspTo)
-	if err := m.comp.Core.CompleteMemoryRead(coreID, rsp.Data); err != nil {
+	if err := m.comp.Core.CompleteMemoryReadAt(
+		coreID, rsp.Data, m.comp.CurrentTime()); err != nil {
 		panic(err)
 	}
 	simdebug.DPrintf(
@@ -320,7 +339,11 @@ func (m *componentMiddleware) receiveMemoryResponse() bool {
 }
 
 func (m *componentMiddleware) sendTranslationResponse() bool {
-	if len(m.pendingResponses) == 0 || !m.topPort().CanSend() {
+	if len(m.pendingResponses) == 0 {
+		return false
+	}
+	if !m.topPort().CanSend() {
+		m.comp.Core.RecordResponseBackpressure()
 		return false
 	}
 	rsp := m.pendingResponses[0]
@@ -410,9 +433,7 @@ func (m *componentMiddleware) applyControl(
 			return false, memcontrolprotocol.ErrMustBePausedOrDrained
 		}
 		if req.PID == 0 {
-			for level := range m.comp.Core.pwcs {
-				m.comp.Core.pwcs[level].reset()
-			}
+			m.comp.Core.InvalidateAll()
 		} else {
 			m.comp.Core.InvalidatePID(req.PID)
 		}

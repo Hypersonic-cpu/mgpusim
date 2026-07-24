@@ -358,6 +358,14 @@ func (b *Builder) connectCPWithTLBs() {
 	for _, l2TLB := range b.l2TLBs {
 		addTLB(l2TLB)
 	}
+
+	// The GMMU shares the TLB shootdown lifecycle so a mapping change also
+	// invalidates its per-level page-walk caches for the affected PID.
+	if b.gpuID == 1 {
+		gmmuCtrlPort := b.mmu.GetPortByName(detailedgmmu.ControlPortName)
+		b.cp.State.TLBs = append(b.cp.State.TLBs, gmmuCtrlPort.AsRemote())
+		b.internalConn.PlugIn(gmmuCtrlPort)
+	}
 }
 
 func (b *Builder) connectCPWithCaches() {

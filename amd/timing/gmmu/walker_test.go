@@ -8,6 +8,7 @@ import (
 
 	"github.com/sarchlab/akita/v5/mem"
 	akitavm "github.com/sarchlab/akita/v5/mem/vm"
+	"github.com/sarchlab/akita/v5/timing"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
@@ -374,6 +375,85 @@ func TestResetRejectsStaleResponsesAndInvalidatesPWCs(t *testing.T) {
 	for level := uint8(0); level < core.Config.Format.NumLevels-1; level++ {
 		if core.PWCOccupancy(level) != 0 {
 			t.Fatalf("PWC %d not reset", level)
+		}
+	}
+}
+
+func TestStatisticsTrackExactColdWalkCounts(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	mapPage(table, 1, 0x4000, 0x2000_0000)
+
+	if err := core.SubmitAt(
+		WalkRequest{ID: 1, PID: 1, VAddr: 0x4000}, 100); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	for level := 0; level < 4; level++ {
+		reads := core.DrainMemoryReads()
+		if len(reads) != 1 {
+			t.Fatalf("level %d reads: %+v", level, reads)
+		}
+		data, err := core.Table.Storage.Read(reads[0].PAddr, reads[0].ByteSize)
+		if err != nil {
+			t.Fatalf("read entry: %v", err)
+		}
+		if err := core.CompleteMemoryReadAt(
+			reads[0].ID, data, timing.VTimeInPicoSec(110+10*level)); err != nil {
+			t.Fatalf("complete level %d: %v", level, err)
+		}
+	}
+
+	stats := core.Stats
+	if stats.TranslationRequests != 1 || stats.WalksStarted != 1 ||
+		stats.WalksCompleted != 1 || stats.MemoryReads != 4 ||
+		stats.PTWBytes != 32 || stats.WalksByMemoryReads[4] != 1 {
+		t.Fatalf("cold walk statistics: %+v", stats)
+	}
+	if stats.PWCMisses[0] != 1 || stats.PWCMisses[1] != 1 ||
+		stats.PWCMisses[2] != 1 || stats.PWCFills[2] != 1 {
+		t.Fatalf("PWC statistics: %+v", stats)
+	}
+	if stats.AverageWalkLatency() != 40 || stats.AveragePTWMemoryLatency() != 10 {
+		t.Fatalf("latency statistics: %+v", stats)
+	}
+}
+
+func TestStatisticsTrackPWQDelayAndPWCInvalidation(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), func(c *Config) {
+		c.NumWalkers = 1
+		c.PWQEntries = 1
+	})
+	mapPage(table, 1, 0x4000, 0x2000_0000)
+	mapPage(table, 1, 0x5000, 0x3000_0000)
+
+	if err := core.SubmitAt(WalkRequest{ID: 1, PID: 1, VAddr: 0x4000}, 0); err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	if err := core.SubmitAt(WalkRequest{ID: 2, PID: 1, VAddr: 0x5000}, 5); err != nil {
+		t.Fatalf("second submit: %v", err)
+	}
+	if err := core.SubmitAt(WalkRequest{ID: 3, PID: 1, VAddr: 0x4000}, 6); !errors.Is(err, ErrPWQFull) {
+		t.Fatalf("full queue: %v", err)
+	}
+
+	for level := 0; level < 4; level++ {
+		reads := core.DrainMemoryReads()
+		data, err := core.Table.Storage.Read(reads[0].PAddr, reads[0].ByteSize)
+		if err != nil {
+			t.Fatalf("read entry: %v", err)
+		}
+		if err := core.CompleteMemoryReadAt(
+			reads[0].ID, data, timing.VTimeInPicoSec(10*(level+1))); err != nil {
+			t.Fatalf("complete entry: %v", err)
+		}
+	}
+	if core.Stats.PWQQueueDelay != 35 || core.Stats.PWQFullStalls != 1 {
+		t.Fatalf("PWQ statistics: %+v", core.Stats)
+	}
+
+	core.InvalidatePID(1)
+	for level := 0; level < 3; level++ {
+		if core.Stats.PWCInvalidations[level] != 1 {
+			t.Fatalf("PWC %d invalidations: %+v", level, core.Stats)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"github.com/sarchlab/akita/v5/mem/cache/writethroughcache"
 	"github.com/sarchlab/akita/v5/mem/vm/addresstranslator"
 	"github.com/sarchlab/akita/v5/simulation"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/cp"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
@@ -83,6 +84,20 @@ func TestDetailedTranslationUsesRadixAndPhysicalL1I(t *testing.T) {
 	}
 	if s.GetComponentByName("GMMU") == nil {
 		t.Fatal("detailed GMMU must be registered")
+	}
+	cpComp, ok := s.GetComponentByName("GPU[1].CommandProcessor").(*cp.Comp)
+	if !ok {
+		t.Fatal("command processor has unexpected type")
+	}
+	gmmuControlRegistered := false
+	for _, controlPort := range cpComp.State.TLBs {
+		if controlPort == "GMMU.Control" {
+			gmmuControlRegistered = true
+			break
+		}
+	}
+	if !gmmuControlRegistered {
+		t.Fatal("GMMU control must participate in TLB shootdowns")
 	}
 
 	atName := "GPU[1].SA[0].L1IAddrTrans"

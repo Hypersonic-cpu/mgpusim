@@ -2,6 +2,7 @@ package runner
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/sarchlab/akita/v5/datarecording"
@@ -10,7 +11,9 @@ import (
 	"github.com/sarchlab/akita/v5/timing"
 	"github.com/sarchlab/akita/v5/tracing"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cu"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/gmmu"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/rdma"
+	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
 const (
@@ -89,6 +92,7 @@ type reporter struct {
 	rdmaTransactionCounters []*rdmaTransactionCountTracer
 	simdBusyTimeTracers     []*simdBusyTimeTracer
 	cuCPITraces             []*cuCPIStackTracer
+	gmmus                   []*gmmu.Comp
 
 	ReportInstCount            bool
 	ReportCacheLatency         bool
@@ -122,6 +126,15 @@ func (r *reporter) injectTracers(s *simulation.Simulation) {
 	r.injectRDMAEngineTracer(s)
 	r.injectDRAMTracer(s)
 	r.injectSIMDBusyTimeTracer(s)
+	r.injectGMMUStats(s)
+}
+
+func (r *reporter) injectGMMUStats(s *simulation.Simulation) {
+	for _, comp := range s.Components() {
+		if gmmuComp, ok := gmmu.Lookup(comp.Name()); ok {
+			r.gmmus = append(r.gmmus, gmmuComp)
+		}
+	}
 }
 
 func (r *reporter) injectKernelTimeTracer(s *simulation.Simulation) {
@@ -384,6 +397,74 @@ func (r *reporter) report() {
 	r.reportTLBHitRate()
 	r.reportRDMATransactionCount()
 	r.reportDRAMTransactionCount()
+	r.reportGMMUStats()
+}
+
+func (r *reporter) reportGMMUStats() {
+	for _, comp := range r.gmmus {
+		stats := comp.Stats()
+		location := comp.Name()
+		reportGMMUCount := func(what string, value uint64) {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location, What: what, Value: float64(value), Unit: "count",
+			})
+		}
+		reportGMMUTime := func(what string, value timing.VTimeInPicoSec) {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location, What: what, Value: secondsOf(value), Unit: "second",
+			})
+		}
+
+		reportGMMUCount("translation_requests", stats.TranslationRequests)
+		reportGMMUCount("walks_started", stats.WalksStarted)
+		reportGMMUCount("walks_completed", stats.WalksCompleted)
+		reportGMMUCount("faults", stats.Faults)
+		reportGMMUCount("pwq_full_stalls", stats.PWQFullStalls)
+		reportGMMUCount("pwq_peak_occupancy", uint64(stats.PeakPWQOccupancy))
+		reportGMMUCount("walkers_peak_busy", uint64(stats.PeakWalkersBusy))
+		reportGMMUCount("translation_response_backpressure_cycles", stats.ResponseBackpressure)
+		reportGMMUCount("ptw_memory_reads", stats.MemoryReads)
+		reportGMMUCount("ptw_memory_bytes", stats.PTWBytes)
+		reportGMMUCount("ptw_memory_responses", stats.MemoryResponses)
+		reportGMMUTime("pwq_average_delay", stats.AverageQueueDelay())
+		reportGMMUTime("walker_busy_time", stats.WalkerBusyTime)
+		reportGMMUTime("walk_average_latency", stats.AverageWalkLatency())
+		reportGMMUTime("ptw_memory_average_latency", stats.AveragePTWMemoryLatency())
+		if totalWalkerTime := comp.CurrentTime() *
+			timing.VTimeInPicoSec(comp.Core.Config.NumWalkers); totalWalkerTime > 0 {
+			r.dataRecorder.InsertData(tableName, metric{
+				Location: location,
+				What:     "walker_utilization",
+				Value:    float64(stats.WalkerBusyTime) / float64(totalWalkerTime),
+				Unit:     "ratio",
+			})
+		}
+
+		for reads := 1; reads <= mgpuvm.MaxPageTableLevels; reads++ {
+			reportGMMUCount("walks_with_"+strconv.Itoa(reads)+"_reads", stats.WalksByMemoryReads[reads])
+		}
+		for level := 0; level < int(comp.Core.Config.Format.NumLevels)-1; level++ {
+			prefix := "pwc_l" + strconv.Itoa(level) + "_"
+			reportGMMUCount(prefix+"probes", stats.PWCProbes[level])
+			reportGMMUCount(prefix+"hits", stats.PWCHits[level])
+			reportGMMUCount(prefix+"misses", stats.PWCMisses[level])
+			reportGMMUCount(prefix+"fills", stats.PWCFills[level])
+			reportGMMUCount(prefix+"evictions", stats.PWCEvictions[level])
+			reportGMMUCount(prefix+"invalidations", stats.PWCInvalidations[level])
+			probes := stats.PWCProbes[level]
+			if probes > 0 {
+				r.dataRecorder.InsertData(tableName, metric{
+					Location: location,
+					What:     prefix + "hit_rate",
+					Value:    float64(stats.PWCHits[level]) / float64(probes),
+					Unit:     "ratio",
+				})
+			}
+		}
+		for bucket, count := range stats.WalkLatencyBuckets {
+			reportGMMUCount("walk_latency_bucket_"+strconv.Itoa(bucket), count)
+		}
+	}
 }
 
 func (r *reporter) reportKernelTime() {
@@ -608,6 +689,15 @@ func (r *reporter) reportTLBHitRate() {
 			tableName,
 			metric{
 				Location: tracer.tlb.Name(),
+				What:     "accesses",
+				Value:    float64(totalTransaction),
+				Unit:     "count",
+			},
+		)
+		r.dataRecorder.InsertData(
+			tableName,
+			metric{
+				Location: tracer.tlb.Name(),
 				What:     "hit",
 				Value:    float64(hit),
 				Unit:     "count",
@@ -619,6 +709,15 @@ func (r *reporter) reportTLBHitRate() {
 				Location: tracer.tlb.Name(),
 				What:     "miss",
 				Value:    float64(miss),
+				Unit:     "count",
+			},
+		)
+		r.dataRecorder.InsertData(
+			tableName,
+			metric{
+				Location: tracer.tlb.Name(),
+				What:     "mshr_hits",
+				Value:    float64(mshrHit),
 				Unit:     "count",
 			},
 		)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	akitavm "github.com/sarchlab/akita/v5/mem/vm"
+	"github.com/sarchlab/akita/v5/timing"
 	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
@@ -84,15 +85,58 @@ func (f TranslationFaultError) Error() string {
 
 // Stats reports deterministic walker and PWC activity.
 type Stats struct {
-	RequestsAccepted uint64
-	RequestsRejected uint64
-	WalksCompleted   uint64
-	Faults           uint64
-	MemoryReads      uint64
+	// TranslationRequests is the number of L2-TLB misses accepted by the GMMU.
+	TranslationRequests uint64
+	WalksStarted        uint64
+	RequestsAccepted    uint64
+	RequestsRejected    uint64
+	PWQFullStalls       uint64
+	WalksCompleted      uint64
+	Faults              uint64
+	MemoryReads         uint64
+	PTWBytes            uint64
+	MemoryResponses     uint64
+
+	PWQQueueDelay        timing.VTimeInPicoSec
+	WalkerBusyTime       timing.VTimeInPicoSec
+	WalkLatency          timing.VTimeInPicoSec
+	PTWMemoryLatency     timing.VTimeInPicoSec
+	ResponseBackpressure uint64
+	WalksByMemoryReads   [mgpuvm.MaxPageTableLevels + 1]uint64
+	WalkLatencyBuckets   [5]uint64
+
+	PWCProbes        [mgpuvm.MaxPageTableLevels]uint64
 	PWCHits          [mgpuvm.MaxPageTableLevels]uint64
 	PWCMisses        [mgpuvm.MaxPageTableLevels]uint64
+	PWCFills         [mgpuvm.MaxPageTableLevels]uint64
+	PWCEvictions     [mgpuvm.MaxPageTableLevels]uint64
+	PWCInvalidations [mgpuvm.MaxPageTableLevels]uint64
 	PeakPWQOccupancy int
 	PeakWalkersBusy  int
+}
+
+// AverageWalkLatency returns zero when no walk has completed.
+func (s Stats) AverageWalkLatency() timing.VTimeInPicoSec {
+	if s.WalksCompleted == 0 {
+		return 0
+	}
+	return s.WalkLatency / timing.VTimeInPicoSec(s.WalksCompleted)
+}
+
+// AverageQueueDelay returns zero when no request has started walking.
+func (s Stats) AverageQueueDelay() timing.VTimeInPicoSec {
+	if s.WalksStarted == 0 {
+		return 0
+	}
+	return s.PWQQueueDelay / timing.VTimeInPicoSec(s.WalksStarted)
+}
+
+// AveragePTWMemoryLatency returns zero when no PTE response has arrived.
+func (s Stats) AveragePTWMemoryLatency() timing.VTimeInPicoSec {
+	if s.MemoryResponses == 0 {
+		return 0
+	}
+	return s.PTWMemoryLatency / timing.VTimeInPicoSec(s.MemoryResponses)
 }
 
 // Config controls the detailed page-walk resources.
@@ -126,6 +170,8 @@ type WalkerState struct {
 	WaitingMemory    bool
 	OutstandingReqID uint64
 	Reads            uint64
+	SubmittedAt      timing.VTimeInPicoSec
+	StartedAt        timing.VTimeInPicoSec
 	inheritedRW      bool
 	inheritedUser    bool
 	inheritedNX      bool
@@ -145,7 +191,10 @@ type Core struct {
 	completed    []Translation
 	faults       []TranslationFaultError
 	reqToWalker  map[uint64]int
+	submittedAt  map[uint64]timing.VTimeInPicoSec
+	memoryIssued map[uint64]timing.VTimeInPicoSec
 	nextMemoryID uint64
+	currentTime  timing.VTimeInPicoSec
 	paused       bool
 	draining     bool
 }
@@ -171,6 +220,8 @@ func NewCore(config Config, table *mgpuvm.RadixPageTable) (*Core, error) {
 		Walkers:      make([]WalkerState, config.NumWalkers),
 		pwcs:         make([]pageWalkCache, int(config.Format.NumLevels)-1),
 		reqToWalker:  make(map[uint64]int),
+		submittedAt:  make(map[uint64]timing.VTimeInPicoSec),
+		memoryIssued: make(map[uint64]timing.VTimeInPicoSec),
 		nextMemoryID: 1,
 	}
 	for level := range core.pwcs {
@@ -181,12 +232,22 @@ func NewCore(config Config, table *mgpuvm.RadixPageTable) (*Core, error) {
 
 // Submit admits one L2-TLB miss to the FCFS PWQ.
 func (c *Core) Submit(req WalkRequest) error {
+	return c.SubmitAt(req, c.currentTime)
+}
+
+// SubmitAt admits a request and records its simulated arrival time.
+func (c *Core) SubmitAt(req WalkRequest, now timing.VTimeInPicoSec) error {
+	c.AdvanceTime(now)
+	now = c.currentTime
 	if !c.CanSubmit() {
 		c.Stats.RequestsRejected++
+		c.Stats.PWQFullStalls++
 		return ErrPWQFull
 	}
 	c.pwq = append(c.pwq, req)
+	c.submittedAt[req.ID] = now
 	c.Stats.RequestsAccepted++
+	c.Stats.TranslationRequests++
 	if len(c.pwq) > c.Stats.PeakPWQOccupancy {
 		c.Stats.PeakPWQOccupancy = len(c.pwq)
 	}
@@ -201,11 +262,26 @@ func (c *Core) CanSubmit() bool {
 
 // CompleteMemoryRead correlates an out-of-order memory response to its walker.
 func (c *Core) CompleteMemoryRead(requestID uint64, data []byte) error {
+	return c.CompleteMemoryReadAt(requestID, data, c.currentTime)
+}
+
+// CompleteMemoryReadAt correlates a response and accounts for PTW latency.
+func (c *Core) CompleteMemoryReadAt(
+	requestID uint64,
+	data []byte,
+	now timing.VTimeInPicoSec,
+) error {
+	c.AdvanceTime(now)
+	now = c.currentTime
 	walkerIndex, ok := c.reqToWalker[requestID]
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrUnknownMemoryResponse, requestID)
 	}
 	delete(c.reqToWalker, requestID)
+	issuedAt := c.memoryIssued[requestID]
+	delete(c.memoryIssued, requestID)
+	c.Stats.MemoryResponses++
+	c.Stats.PTWMemoryLatency += now - issuedAt
 
 	walker := &c.Walkers[walkerIndex]
 	if !walker.Busy || !walker.WaitingMemory ||
@@ -243,12 +319,15 @@ func (c *Core) CompleteMemoryRead(requestID uint64, data []byte) error {
 			c.failWalker(walkerIndex, "unexpected intermediate page-size entry")
 			return nil
 		}
-		c.pwcs[level].insert(c.pwcKey(walker.Req, level), pwcValue{
+		if c.pwcs[level].insert(c.pwcKey(walker.Req, level), pwcValue{
 			ChildTablePAddr: entry.PhysicalBase,
 			ReadWrite:       walker.inheritedRW,
 			User:            walker.inheritedUser,
 			NoExecute:       walker.inheritedNX,
-		})
+		}) {
+			c.Stats.PWCEvictions[level]++
+		}
+		c.Stats.PWCFills[level]++
 		simdebug.DPrintf(
 			simdebug.PWC,
 			"fill req=%d pid=%d level=%d child=0x%x",
@@ -313,11 +392,13 @@ func (c *Core) Reset() {
 	c.completed = nil
 	c.faults = nil
 	clear(c.reqToWalker)
+	clear(c.submittedAt)
+	clear(c.memoryIssued)
 	for index := range c.Walkers {
 		c.Walkers[index] = WalkerState{}
 	}
 	for level := range c.pwcs {
-		c.pwcs[level].reset()
+		c.Stats.PWCInvalidations[level] += c.pwcs[level].reset()
 	}
 	c.paused = false
 	c.draining = false
@@ -326,8 +407,31 @@ func (c *Core) Reset() {
 // InvalidatePID removes cached intermediate entries for one process.
 func (c *Core) InvalidatePID(pid akitavm.PID) {
 	for level := range c.pwcs {
-		c.pwcs[level].invalidatePID(pid)
+		c.Stats.PWCInvalidations[level] += c.pwcs[level].invalidatePID(pid)
 	}
+}
+
+// InvalidateAll removes all intermediate entries, including every PID.
+func (c *Core) InvalidateAll() {
+	for level := range c.pwcs {
+		c.Stats.PWCInvalidations[level] += c.pwcs[level].reset()
+	}
+}
+
+// AdvanceTime accounts for busy walkers between two component ticks.
+func (c *Core) AdvanceTime(now timing.VTimeInPicoSec) {
+	if now < c.currentTime {
+		return
+	}
+	c.Stats.WalkerBusyTime += (now - c.currentTime) *
+		timing.VTimeInPicoSec(c.busyWalkers())
+	c.currentTime = now
+}
+
+// RecordResponseBackpressure records a cycle in which a completed
+// translation could not be returned to the L2 TLB.
+func (c *Core) RecordResponseBackpressure() {
+	c.Stats.ResponseBackpressure++
 }
 
 // PWCOccupancy returns one intermediate cache's current occupancy.
@@ -381,9 +485,14 @@ func (c *Core) startWalker(walkerIndex int, req WalkRequest) {
 		Busy:          true,
 		Req:           req,
 		Indices:       indices,
+		SubmittedAt:   c.submittedAt[req.ID],
+		StartedAt:     c.currentTime,
 		inheritedRW:   true,
 		inheritedUser: true,
 	}
+	delete(c.submittedAt, req.ID)
+	c.Stats.WalksStarted++
+	c.Stats.PWQQueueDelay += c.currentTime - c.Walkers[walkerIndex].SubmittedAt
 	c.Walkers[walkerIndex].TablePAddrs[0] = addressSpace.RootPAddr
 	simdebug.DPrintf(
 		simdebug.GMMUWalk,
@@ -396,6 +505,7 @@ func (c *Core) advanceWalker(walkerIndex int) {
 	walker := &c.Walkers[walkerIndex]
 	for walker.CurrentLevel < c.Config.Format.NumLevels-1 {
 		level := walker.CurrentLevel
+		c.Stats.PWCProbes[level]++
 		value, hit := c.pwcs[level].lookup(c.pwcKey(walker.Req, level))
 		if !hit {
 			c.Stats.PWCMisses[level]++
@@ -446,6 +556,7 @@ func (c *Core) issueRead(walkerIndex int) {
 	walker.OutstandingReqID = requestID
 	walker.Reads++
 	c.reqToWalker[requestID] = walkerIndex
+	c.memoryIssued[requestID] = c.currentTime
 	c.outgoing = append(c.outgoing, MemoryRead{
 		ID:           requestID,
 		Walker:       walkerIndex,
@@ -455,6 +566,7 @@ func (c *Core) issueRead(walkerIndex int) {
 		TrafficClass: PTETrafficClass,
 	})
 	c.Stats.MemoryReads++
+	c.Stats.PTWBytes += uint64(c.Config.Format.EntryBytes)
 }
 
 func (c *Core) completeWalker(walkerIndex int, physicalBase uint64) {
@@ -477,8 +589,28 @@ func (c *Core) completeWalker(walkerIndex int, physicalBase uint64) {
 		Reads:     walker.Reads,
 	})
 	c.Stats.WalksCompleted++
+	c.Stats.WalkLatency += c.currentTime - walker.StartedAt
+	if walker.Reads <= mgpuvm.MaxPageTableLevels {
+		c.Stats.WalksByMemoryReads[walker.Reads]++
+	}
+	c.Stats.WalkLatencyBuckets[walkLatencyBucket(c.currentTime-walker.StartedAt)]++
 	c.Walkers[walkerIndex] = WalkerState{}
 	c.dispatch()
+}
+
+func walkLatencyBucket(latency timing.VTimeInPicoSec) int {
+	switch {
+	case latency == 0:
+		return 0
+	case latency <= 10_000:
+		return 1
+	case latency <= 100_000:
+		return 2
+	case latency <= 1_000_000:
+		return 3
+	default:
+		return 4
+	}
 }
 
 func (c *Core) failWalker(walkerIndex int, reason string) {

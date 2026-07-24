@@ -160,6 +160,9 @@ func TestComponentHonorsTranslationResponseBackpressure(t *testing.T) {
 	if len(comp.Core.DrainTranslations()) != 0 {
 		t.Fatal("component did not retain completion")
 	}
+	if comp.Stats().ResponseBackpressure == 0 {
+		t.Fatal("component did not count response backpressure")
+	}
 
 	for top.RetrieveOutgoing() != nil {
 	}
@@ -169,6 +172,42 @@ func TestComponentHonorsTranslationResponseBackpressure(t *testing.T) {
 	response := top.RetrieveOutgoing()
 	if response == nil || response.Meta().RspTo != req.ID {
 		t.Fatalf("response after unblock: %+v", response)
+	}
+}
+
+func TestComponentControlInvalidatesPWCsForShootdownPID(t *testing.T) {
+	comp, ports := makeComponent(t)
+	mapPage(comp.Resources().PageTable, 7, 0x4000, 0x2000_0000)
+	if err := comp.Core.Submit(WalkRequest{ID: 1, PID: 7, VAddr: 0x4000}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	finishCore(t, comp.Core)
+	comp.Core.DrainTranslations()
+
+	control := ports[ControlPortName]
+	for _, request := range []memcontrolprotocol.Req{
+		{Command: memcontrolprotocol.CmdPause},
+		{Command: memcontrolprotocol.CmdInvalidate, PID: 7},
+	} {
+		request.ID = timing.GetIDGenerator().Generate()
+		request.Src = "Driver.Control"
+		request.Dst = control.AsRemote()
+		control.Deliver(request)
+		if !comp.Tick() {
+			t.Fatalf("%v made no progress", request.Command)
+		}
+		response := control.RetrieveOutgoing().(memcontrolprotocol.Rsp)
+		if !response.Success || response.Command != request.Command {
+			t.Fatalf("control response: %+v", response)
+		}
+	}
+
+	for level := uint8(0); level < comp.Core.Config.Format.NumLevels-1; level++ {
+		if comp.Core.PWCOccupancy(level) != 0 ||
+			comp.Stats().PWCInvalidations[level] != 1 {
+			t.Fatalf("PWC %d after invalidate: occupancy=%d stats=%+v",
+				level, comp.Core.PWCOccupancy(level), comp.Stats())
+		}
 	}
 }
 
