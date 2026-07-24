@@ -110,6 +110,7 @@ func (b Builder) WithTranslationSelection(mode, profile string) Builder {
 // GPUs, and all the connections register themselves with the simulation.
 func (b Builder) Build() *driver.Driver {
 	latpc.ResetRuntimeMetadata()
+	latpc.ResetRuntimeDetector(mgpuvm.X86FourLevel4KFormat())
 	b.adjustConfigForGPUType()
 	b.cpuGPUMemSizeMustEqual()
 

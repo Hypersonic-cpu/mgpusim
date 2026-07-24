@@ -321,6 +321,7 @@ func (b *Builder) attachTranslationMetadataBridges() {
 		latpc.AttachMetadataBridge(b.sa.L1VROBs[i])
 		latpc.AttachMetadataBridge(b.sa.L1VATs[i])
 		latpc.AttachMetadataBridge(b.sa.L1VTLBs[i])
+		latpc.AttachDetector(b.sa.L1VTLBs[i])
 	}
 	latpc.AttachMetadataBridge(b.sa.L1SROB)
 	latpc.AttachMetadataBridge(b.sa.L1SAT)

@@ -33,6 +33,8 @@ const (
 	TLBFill Flag = "TLBFill"
 	// Fault reports translation faults.
 	Fault Flag = "Fault"
+	// LATPCDetector reports bounded regularity-detector decisions.
+	LATPCDetector Flag = "LATPCDetector"
 )
 
 var (
@@ -45,6 +47,7 @@ var (
 var knownFlags = map[Flag]struct{}{
 	VMMap: {}, PageTable: {}, GMMUWalk: {}, PWC: {}, PTWMem: {}, MemRoute: {},
 	TLBReplay: {}, TLBFill: {}, Fault: {},
+	LATPCDetector: {},
 }
 
 // Config controls debug-log categories and destination. Exactly one of Writer

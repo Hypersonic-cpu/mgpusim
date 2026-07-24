@@ -12,6 +12,7 @@ import (
 // order and boundary; LaneMask preserves the originating wave64 lanes.
 type GroupMember struct {
 	InstructionID uint64
+	RequestID     uint64
 	Position      uint16
 	Count         uint16
 	VAddr         uint64

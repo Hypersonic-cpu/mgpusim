@@ -353,9 +353,11 @@ func (u *VectorMemoryUnit) registerTranslationGroup(
 		}
 		if transaction.Read != nil {
 			member.VAddr = transaction.Read.Address
+			member.RequestID = transaction.Read.ID
 			latpc.RegisterRequestMetadata(transaction.Read.ID, member)
 		} else {
 			member.VAddr = transaction.Write.Address
+			member.RequestID = transaction.Write.ID
 			latpc.RegisterRequestMetadata(transaction.Write.ID, member)
 		}
 	}
