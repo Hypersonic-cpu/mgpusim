@@ -179,6 +179,33 @@ def build_binaries(selected: set[str] | None = None) -> None:
         ]
         print("+", " ".join(command), flush=True)
         subprocess.run(command, cwd=ROOT, env=environment, check=True)
+    manifest_path = BIN / "build_manifest.json"
+    manifest: dict[str, Any] = {
+        "gOMEMLIMIT": GOMEMLIMIT,
+        "binaries": {},
+    }
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        manifest["gOMEMLIMIT"] = GOMEMLIMIT
+    for workload in WORKLOADS:
+        if selected and workload.name not in selected:
+            continue
+        manifest["binaries"][workload.name] = {
+            "package": workload.package,
+            "git_commit": git_commit(),
+        }
+    atomic_json(manifest_path, manifest)
+
+
+def binary_commit(workload: str) -> str:
+    manifest_path = BIN / "build_manifest.json"
+    if not manifest_path.exists():
+        return git_commit()
+    manifest = json.loads(manifest_path.read_text())
+    binary = manifest["binaries"].get(workload)
+    if not binary:
+        return git_commit()
+    return str(binary["git_commit"])
 
 
 def process_group_rss_bytes(pgid: int) -> int:
@@ -265,7 +292,10 @@ def run_one(
 
     if not force and status_path.exists():
         status = json.loads(status_path.read_text())
-        if status.get("status") != "PASS" or metrics_path.exists():
+        built_from = binary_commit(workload.name)
+        reusable = status.get("git_commit") == built_from
+        complete = status.get("status") != "PASS" or metrics_path.exists()
+        if reusable and complete:
             print(
                 f"resume {workload.name} {profile} {mode} {tier}: "
                 f"{status.get('status')}",
@@ -343,7 +373,7 @@ def run_one(
         "rss_watchdog_bytes": RSS_LIMIT_BYTES,
         "rss_sampling_seconds": RSS_INTERVAL_SECONDS,
         "command": command,
-        "git_commit": git_commit(),
+        "git_commit": binary_commit(workload.name),
         "metrics": str(metrics_path.relative_to(ROOT)),
         "stdout": str(stdout_path.relative_to(ROOT)),
         "stderr": str(stderr_path.relative_to(ROOT)),
@@ -536,6 +566,7 @@ def metric_first(
 
 CSV_COLUMNS = (
     "workload",
+    "git_commit",
     "translation_profile",
     "mode",
     "input_tier",
@@ -581,6 +612,7 @@ def result_row(status: dict[str, Any], directory: Path) -> dict[str, Any]:
         )
     return {
         "workload": status["workload"],
+        "git_commit": status["git_commit"],
         "translation_profile": status["translation_profile"],
         "mode": status["mode"],
         "input_tier": status["input_tier"],
@@ -632,6 +664,7 @@ def collect_results() -> None:
                 }
                 | {
                     "workload": workload.name,
+                    "git_commit": "",
                     "translation_profile": "large-resource",
                     "mode": "baseline",
                     "input_tier": resolution["input_tier"],
