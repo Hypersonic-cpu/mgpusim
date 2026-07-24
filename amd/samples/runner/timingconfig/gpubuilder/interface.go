@@ -6,6 +6,7 @@ import (
 	"github.com/sarchlab/akita/v5/mem"
 	"github.com/sarchlab/akita/v5/messaging"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cp"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 )
 
 // GPU is the externally visible handle of a built GPU. It replaces the v4
@@ -58,5 +59,6 @@ type GPUBuilder interface {
 	WithMemAddrOffset(offset uint64) GPUBuilder
 	WithRDMAAddressMapper(mapper mem.AddressToPortMapper) GPUBuilder
 	WithDriverPort(port messaging.RemotePort) GPUBuilder
+	WithTranslationConfig(config latpc.Config) GPUBuilder
 	Build(name string) *GPU
 }

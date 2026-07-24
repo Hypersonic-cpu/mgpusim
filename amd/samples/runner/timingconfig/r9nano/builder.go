@@ -21,6 +21,7 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cp"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cu"
 	detailedgmmu "github.com/sarchlab/mgpusim/v5/amd/timing/gmmu"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/rdma"
 )
 
@@ -59,6 +60,7 @@ type Builder struct {
 	gmmuMemoryMapper               *mem.InterleavedAddressPortMapper
 	rdmaAddressMapper              mem.AddressToPortMapper
 	driverPort                     messaging.RemotePort
+	translationConfig              latpc.Config
 
 	gpu                *gpubuilder.GPU
 	cp                 *cp.Comp
@@ -88,6 +90,7 @@ func MakeBuilder() Builder {
 		log2MemoryBankInterleavingSize: 7,
 		memAddrOffset:                  0,
 		dramSize:                       4 * mem.GB,
+		translationConfig:              latpc.DefaultConfig(),
 	}
 }
 
@@ -201,6 +204,14 @@ func (b Builder) WithDriverPort(
 	port messaging.RemotePort,
 ) gpubuilder.GPUBuilder {
 	b.driverPort = port
+	return b
+}
+
+// WithTranslationConfig selects translation mechanisms and capacities.
+func (b Builder) WithTranslationConfig(
+	config latpc.Config,
+) gpubuilder.GPUBuilder {
+	b.translationConfig = config
 	return b
 }
 
@@ -483,7 +494,8 @@ func (b *Builder) buildSAs() {
 		WithLog2CacheLineSize(b.log2CacheLineSize).
 		WithLog2PageSize(b.log2PageSize).
 		WithL1AddressMapper(b.l1AddressMapper).
-		WithL1TLBAddressMapper(b.l1TLBAddressMapper)
+		WithL1TLBAddressMapper(b.l1TLBAddressMapper).
+		WithTranslationConfig(b.translationConfig)
 
 	for i := 0; i < b.numShaderArray; i++ {
 		saName := fmt.Sprintf("%s.SA[%d]", b.name, i)
@@ -694,14 +706,16 @@ func (b *Builder) buildCP() {
 }
 
 func (b *Builder) buildL2TLB() {
-	numWays := 64
+	resources := b.translationConfig.Resources
+	numWays := resources.L2TLBWays
 
 	spec := tlb.DefaultSpec()
 	spec.Freq = b.freq
 	spec.NumWays = numWays
-	spec.NumSets = int(b.dramSize / (1 << b.log2PageSize) / uint64(numWays))
-	spec.MSHRSize = 64
-	spec.NumReqPerCycle = 1024
+	spec.NumSets = resources.L2TLBEntries / numWays
+	spec.MSHRSize = resources.L2TLBMSHRs
+	spec.NumReqPerCycle = resources.L2TLBPorts
+	spec.Latency = resources.L2TLBLatency
 	spec.Log2PageSize = b.log2PageSize
 
 	l2TLB := tlb.MakeBuilder().

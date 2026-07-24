@@ -8,6 +8,7 @@ import (
 	"github.com/sarchlab/akita/v5/mem"
 	akitavm "github.com/sarchlab/akita/v5/mem/vm"
 	"github.com/sarchlab/akita/v5/timing"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
@@ -497,5 +498,26 @@ func TestPageTableWriteSnoopRepairsStaleCachedLeaf(t *testing.T) {
 	if core.Stats.PTECoherenceRepairs != 1 {
 		t.Fatalf("coherence repairs: got %d, want 1",
 			core.Stats.PTECoherenceRepairs)
+	}
+}
+
+func TestIdealModeBypassesDetailedWalk(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), func(c *Config) {
+		c.TranslationMode = latpc.ModeIdeal
+	})
+	mapPage(table, 1, 0x4000, 0x9000)
+
+	if err := core.Submit(WalkRequest{ID: 7, PID: 1, VAddr: 0x4000}); err != nil {
+		t.Fatal(err)
+	}
+	completed := core.DrainTranslations()
+	if len(completed) != 1 || completed[0].Page.PAddr != 0x9000 {
+		t.Fatalf("unexpected ideal translation: %+v", completed)
+	}
+	if len(core.DrainMemoryReads()) != 0 {
+		t.Fatal("ideal translation must not issue page-table reads")
+	}
+	if core.Stats.WalksStarted != 0 || core.Stats.MemoryReads != 0 {
+		t.Fatalf("ideal mode used detailed walker: %+v", core.Stats)
 	}
 }

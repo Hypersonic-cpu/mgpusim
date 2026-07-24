@@ -9,6 +9,7 @@ import (
 	akitavm "github.com/sarchlab/akita/v5/mem/vm"
 	"github.com/sarchlab/akita/v5/timing"
 	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
@@ -142,19 +143,21 @@ func (s Stats) AveragePTWMemoryLatency() timing.VTimeInPicoSec {
 
 // Config controls the detailed page-walk resources.
 type Config struct {
-	Format     mgpuvm.PageTableFormat
-	PWQEntries int
-	NumWalkers int
-	PWCEntries int
+	Format          mgpuvm.PageTableFormat
+	PWQEntries      int
+	NumWalkers      int
+	PWCEntries      int
+	TranslationMode latpc.Mode
 }
 
 // DefaultConfig returns the LATPC-baseline translation resources.
 func DefaultConfig() Config {
 	return Config{
-		Format:     mgpuvm.X86FourLevel4KFormat(),
-		PWQEntries: DefaultPWQEntries,
-		NumWalkers: DefaultNumWalkers,
-		PWCEntries: DefaultPWCEntries,
+		Format:          mgpuvm.X86FourLevel4KFormat(),
+		PWQEntries:      DefaultPWQEntries,
+		NumWalkers:      DefaultNumWalkers,
+		PWCEntries:      DefaultPWCEntries,
+		TranslationMode: latpc.ModeBaseline,
 	}
 }
 
@@ -245,6 +248,27 @@ func (c *Core) SubmitAt(req WalkRequest, now timing.VTimeInPicoSec) error {
 		c.Stats.PWQFullStalls++
 		return ErrPWQFull
 	}
+	if c.Config.TranslationMode == latpc.ModeIdeal {
+		c.Stats.RequestsAccepted++
+		c.Stats.TranslationRequests++
+		page, ok := c.Table.Find(req.PID, req.VAddr)
+		if !ok {
+			c.Stats.Faults++
+			c.faults = append(c.faults, TranslationFaultError{
+				RequestID: req.ID,
+				PID:       req.PID,
+				VAddr:     req.VAddr,
+				Reason:    "ideal translation mapping not found",
+			})
+			return nil
+		}
+		c.Stats.WalksCompleted++
+		c.completed = append(c.completed, Translation{
+			RequestID: req.ID,
+			Page:      page,
+		})
+		return nil
+	}
 	c.pwq = append(c.pwq, req)
 	c.submittedAt[req.ID] = now
 	c.Stats.RequestsAccepted++
@@ -258,6 +282,9 @@ func (c *Core) SubmitAt(req WalkRequest, now timing.VTimeInPicoSec) error {
 
 // CanSubmit reports whether Top may retrieve another translation request.
 func (c *Core) CanSubmit() bool {
+	if c.Config.TranslationMode == latpc.ModeIdeal {
+		return !c.paused && !c.draining
+	}
 	return !c.paused && !c.draining && len(c.pwq) < c.Config.PWQEntries
 }
 

@@ -17,6 +17,12 @@ var isaDebug = flag.Bool("debug-isa", false, "Generate the ISA debugging file.")
 var archFlag = flag.String("arch", "gcn3", "GPU architecture: gcn3 or cdna3.")
 var gpuTypeFlag = flag.String("gpu", "r9nano",
 	"GPU model for timing simulation: r9nano or mi300x.")
+var translationModeFlag = flag.String(
+	"translation-mode", "baseline",
+	"Translation mode: baseline, latc, latp, latpc, or ideal.")
+var translationProfileFlag = flag.String(
+	"translation-profile", "paper",
+	"Translation resources: paper or large-resource.")
 
 var verifyFlag = flag.Bool("verify", false, "Verify the emulation result.")
 var memTracing = flag.Bool("trace-mem", false, "Generate memory trace")
@@ -120,6 +126,8 @@ func (r *Runner) parseSimulationFlags() {
 
 	r.ArchType = parseArchFlag()
 	r.GPUType = parseGPUTypeFlag()
+	r.TranslationMode = *translationModeFlag
+	r.TranslationProfile = *translationProfileFlag
 }
 
 func (r *Runner) parseGPUFlag() {

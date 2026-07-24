@@ -5,8 +5,11 @@ import (
 
 	"github.com/sarchlab/akita/v5/mem/cache/writethroughcache"
 	"github.com/sarchlab/akita/v5/mem/vm/addresstranslator"
+	"github.com/sarchlab/akita/v5/mem/vm/tlb"
 	"github.com/sarchlab/akita/v5/simulation"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cp"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/gmmu"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
@@ -56,6 +59,52 @@ func TestBuildR9NanoMultiGPUPlatform(t *testing.T) {
 
 func TestBuildMI300XPlatform(t *testing.T) {
 	buildPlatform(t, "mi300x", 1)
+}
+
+func TestTranslationSelectionReachesBuiltResources(t *testing.T) {
+	s := simulation.MakeBuilder().
+		WithoutMonitoring().
+		WithOutputFileName(t.TempDir() + "/sim").
+		Build()
+	defer s.Terminate()
+
+	MakeBuilder().
+		WithSimulation(s).
+		WithNumGPUs(1).
+		WithGPUType("mi300x").
+		WithTranslationSelection("latpc", "large-resource").
+		Build()
+
+	gmmuComp, ok := gmmu.Lookup("GMMU")
+	if !ok {
+		t.Fatal("GMMU wrapper not registered")
+	}
+	if gmmuComp.Core.Config.TranslationMode != latpc.ModeLATPC ||
+		gmmuComp.Core.Config.PWQEntries != 256 ||
+		gmmuComp.Core.Config.NumWalkers != 32 ||
+		gmmuComp.Core.Config.PWCEntries != 32 {
+		t.Fatalf("unexpected GMMU config: %+v", gmmuComp.Core.Config)
+	}
+
+	l1Name := "GPU[1].SA[0].L1VTLB[0]"
+	l1, ok := s.GetComponentByName(l1Name).(*tlb.Comp)
+	if !ok {
+		t.Fatalf("component %s has unexpected type", l1Name)
+	}
+	if l1.Spec().NumSets*l1.Spec().NumWays != 64 ||
+		l1.Spec().MSHRSize != 16 || l1.Spec().Log2PageSize != 12 {
+		t.Fatalf("unexpected L1 TLB spec: %+v", l1.Spec())
+	}
+
+	l2Name := "GPU[1].L2TLB"
+	l2, ok := s.GetComponentByName(l2Name).(*tlb.Comp)
+	if !ok {
+		t.Fatalf("component %s has unexpected type", l2Name)
+	}
+	if l2.Spec().NumSets*l2.Spec().NumWays != 4096 ||
+		l2.Spec().MSHRSize != 128 || l2.Spec().Log2PageSize != 12 {
+		t.Fatalf("unexpected L2 TLB spec: %+v", l2.Spec())
+	}
 }
 
 //nolint:funlen // One integration test checks the complete timing wiring invariant.

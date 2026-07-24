@@ -17,6 +17,7 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/emu"
 	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/cu"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 )
 
 // Port buffer sizes. The CU port sizes mirror the v4 CU builder; the other
@@ -83,6 +84,7 @@ type Builder struct {
 	l1TLBAddressMapper        mem.AddressToPortMapper
 	aluBuilder                func() emu.ALU
 	decoderBuilder            func() emu.Decoder
+	translationConfig         latpc.Config
 
 	sa *ShaderArray
 
@@ -96,6 +98,7 @@ func MakeBuilder() Builder {
 		freq:              1 * timing.GHz,
 		log2CacheLineSize: 6,
 		log2PageSize:      12,
+		translationConfig: latpc.DefaultConfig(),
 	}
 }
 
@@ -150,6 +153,12 @@ func (b Builder) WithL1TLBAddressMapper(
 	l1TLBAddressMapper mem.AddressToPortMapper,
 ) Builder {
 	b.l1TLBAddressMapper = l1TLBAddressMapper
+	return b
+}
+
+// WithTranslationConfig selects translation mechanisms and capacities.
+func (b Builder) WithTranslationConfig(config latpc.Config) Builder {
+	b.translationConfig = config
 	return b
 }
 
@@ -584,6 +593,7 @@ func (b *Builder) buildTLB(
 }
 
 func (b *Builder) buildL1VTLBs() {
+	resources := b.translationConfig.Resources
 	for i := 0; i < b.numCUs; i++ {
 		name := fmt.Sprintf("%s.L1VTLB[%d]", b.name, i)
 		// v4 used a 1-cycle TLB. The v5 TLB inserts requests into its
@@ -592,7 +602,9 @@ func (b *Builder) buildL1VTLBs() {
 		// already at the last stage is never decremented (akita
 		// v5.0.0-beta.2 queueing.Pipeline), so the request deadlocks.
 		// Latency=2 is the minimum functional value.
-		tlbComp := b.buildTLB(name, 4, 64, 64, 32, 2)
+		tlbComp := b.buildTLB(
+			name, 1, resources.L1TLBEntries, resources.L1TLBMSHRs,
+			resources.L1TLBPorts, resources.L1TLBLatency)
 		b.sa.L1VTLBs = append(b.sa.L1VTLBs, tlbComp)
 	}
 }
@@ -668,7 +680,10 @@ func (b *Builder) buildL1SAddressTranslator() {
 
 func (b *Builder) buildL1STLB() {
 	name := fmt.Sprintf("%s.L1STLB", b.name)
-	b.sa.L1STLB = b.buildTLB(name, 1, 64, 64, 32, 4)
+	resources := b.translationConfig.Resources
+	b.sa.L1STLB = b.buildTLB(
+		name, 1, resources.L1TLBEntries, resources.L1TLBMSHRs,
+		resources.L1TLBPorts, resources.L1TLBLatency)
 }
 
 func (b *Builder) buildL1SCache() {
@@ -711,7 +726,10 @@ func (b *Builder) buildL1IAddressTranslator() {
 
 func (b *Builder) buildL1ITLB() {
 	name := fmt.Sprintf("%s.L1ITLB", b.name)
-	b.sa.L1ITLB = b.buildTLB(name, 1, 64, 4, 4, 4)
+	resources := b.translationConfig.Resources
+	b.sa.L1ITLB = b.buildTLB(
+		name, 1, resources.L1TLBEntries, resources.L1TLBMSHRs,
+		resources.L1TLBPorts, resources.L1TLBLatency)
 }
 
 func (b *Builder) buildL1ICache() {

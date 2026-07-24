@@ -31,12 +31,14 @@ type Runner struct {
 	gpuDriver  *driver.Driver
 	reporter   *reporter
 
-	Timing           bool
-	Verify           bool
-	Parallel         bool
-	UseUnifiedMemory bool
-	ArchType         arch.Type
-	GPUType          string
+	Timing             bool
+	Verify             bool
+	Parallel           bool
+	UseUnifiedMemory   bool
+	ArchType           arch.Type
+	GPUType            string
+	TranslationMode    string
+	TranslationProfile string
 
 	GPUIDs     []int
 	benchmarks []benchmarks.Benchmark
@@ -110,7 +112,8 @@ func (r *Runner) buildTimingPlatform() {
 	b := timingconfig.MakeBuilder().
 		WithSimulation(r.simulation).
 		WithNumGPUs(r.GPUIDs[len(r.GPUIDs)-1]).
-		WithGPUType(r.GPUType)
+		WithGPUType(r.GPUType).
+		WithTranslationSelection(r.TranslationMode, r.TranslationProfile)
 
 	if *magicMemoryCopy {
 		b = b.WithMagicMemoryCopy()

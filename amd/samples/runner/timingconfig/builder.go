@@ -17,6 +17,7 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/samples/runner/timingconfig/r9nano"
 	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
 	detailedgmmu "github.com/sarchlab/mgpusim/v5/amd/timing/gmmu"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
@@ -46,6 +47,7 @@ type Builder struct {
 	switchLatency      int // PCIe/interconnect switch latency in cycles
 	d2hCycles          int
 	h2dCycles          int
+	translationConfig  latpc.Config
 
 	globalStorage     *mem.Storage
 	rdmaAddressMapper *mem.BankedAddressPortMapper
@@ -66,6 +68,7 @@ func MakeBuilder() Builder {
 		switchLatency:      140, // default PCIe Gen4
 		d2hCycles:          300,
 		h2dCycles:          500,
+		translationConfig:  latpc.DefaultConfig(),
 	}
 }
 
@@ -90,6 +93,16 @@ func (b Builder) WithMagicMemoryCopy() Builder {
 // WithGPUType sets the GPU type for timing simulation (r9nano or mi300x).
 func (b Builder) WithGPUType(gpuType string) Builder {
 	b.gpuType = gpuType
+	return b
+}
+
+// WithTranslationSelection selects one LATPC mode and resource profile.
+func (b Builder) WithTranslationSelection(mode, profile string) Builder {
+	config, err := latpc.NewConfig(mode, profile)
+	if err != nil {
+		panic(err)
+	}
+	b.translationConfig = config
 	return b
 }
 
@@ -158,6 +171,10 @@ func (b *Builder) createGMMU() (*detailedgmmu.Comp, *mgpuvm.RadixPageTable) {
 	spec := detailedgmmu.Spec{Freq: 1 * timing.GHz}
 	walkerConfig := detailedgmmu.DefaultConfig()
 	walkerConfig.Format = format
+	walkerConfig.PWQEntries = b.translationConfig.Resources.PWQEntries
+	walkerConfig.NumWalkers = b.translationConfig.Resources.Walkers
+	walkerConfig.PWCEntries = b.translationConfig.Resources.PWCEntries[0]
+	walkerConfig.TranslationMode = b.translationConfig.Mode
 	mmuComponent := detailedgmmu.MakeBuilder().
 		WithRegistrar(b.simulation).
 		WithSpec(spec).
@@ -239,6 +256,7 @@ func (b *Builder) createGPUBuilder(
 			WithGMMUMemoryMapper(b.gmmuMemoryMapper).
 			WithLog2PageSize(b.log2PageSize).
 			WithGlobalStorage(b.globalStorage).
+			WithTranslationConfig(b.translationConfig).
 			WithDriverPort(driverPort)
 	default:
 		return r9nano.MakeBuilder().
@@ -247,6 +265,7 @@ func (b *Builder) createGPUBuilder(
 			WithGMMUMemoryMapper(b.gmmuMemoryMapper).
 			WithLog2PageSize(b.log2PageSize).
 			WithGlobalStorage(b.globalStorage).
+			WithTranslationConfig(b.translationConfig).
 			WithDriverPort(driverPort)
 	}
 }
