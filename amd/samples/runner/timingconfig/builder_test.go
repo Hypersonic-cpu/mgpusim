@@ -96,9 +96,14 @@ func TestTranslationSelectionReachesBuiltResources(t *testing.T) {
 		t.Fatalf("unexpected L1 TLB spec: %+v", l1.Spec())
 	}
 	latcComponents := latpc.LATCComponents()
-	if len(latcComponents) == 0 ||
+	if len(latcComponents) != 304 ||
 		latcComponents[0].Spec().MSHRSize != 16 {
 		t.Fatalf("LATC does not own the logical 16-entry capacity")
+	}
+	latpComponents := latpc.LATPComponents()
+	if len(latpComponents) != 1 ||
+		latpComponents[0].Spec().Entries != 256 {
+		t.Fatalf("LATP does not own the grouped PW buffer")
 	}
 
 	l2Name := "GPU[1].L2TLB"
@@ -109,6 +114,10 @@ func TestTranslationSelectionReachesBuiltResources(t *testing.T) {
 	if l2.Spec().NumSets*l2.Spec().NumWays != 4096 ||
 		l2.Spec().MSHRSize != 128 || l2.Spec().Log2PageSize != 12 {
 		t.Fatalf("unexpected L2 TLB spec: %+v", l2.Spec())
+	}
+	if got := l2.Resources().TranslationProviderMapper.Find(0x4000); got !=
+		"GPU[1].LATP.Top" {
+		t.Fatalf("L2 miss route bypasses LATP: %s", got)
 	}
 }
 
