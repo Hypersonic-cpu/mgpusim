@@ -30,26 +30,25 @@ func newDeviceRegularMemoryState(log2pagesize uint64) DeviceMemoryState {
 	}
 }
 
-//original implementation of DeviceMemoryState holding free addresses in array
+// deviceMemoryStateImpl allocates sequentially without materializing every
+// physical frame in the device range. Freed pages are retained in a small
+// recycle stack.
 type deviceMemoryStateImpl struct {
-	log2PageSize    uint64
-	initialAddress  uint64
-	storageSize     uint64
-	availablePAddrs []uint64
+	log2PageSize   uint64
+	initialAddress uint64
+	storageSize    uint64
+	nextPAddr      uint64
+	recycledPAddrs []uint64
 }
 
 func (dms *deviceMemoryStateImpl) setInitialAddress(addr uint64) {
 	dms.initialAddress = addr
-
-	pageSize := uint64(1 << dms.log2PageSize)
-	endAddr := dms.initialAddress + dms.storageSize
-	for addr := dms.initialAddress; addr < endAddr; addr += pageSize {
-		dms.addSinglePAddr(addr)
-	}
+	dms.nextPAddr = addr
+	dms.recycledPAddrs = nil
 }
 
 func (dms *deviceMemoryStateImpl) getInitialAddress() uint64 {
-		return dms.initialAddress
+	return dms.initialAddress
 }
 
 func (dms *deviceMemoryStateImpl) setStorageSize(size uint64) {
@@ -61,17 +60,27 @@ func (dms *deviceMemoryStateImpl) getStorageSize() uint64 {
 }
 
 func (dms *deviceMemoryStateImpl) addSinglePAddr(addr uint64) {
-	dms.availablePAddrs = append(dms.availablePAddrs, addr)
+	dms.recycledPAddrs = append(dms.recycledPAddrs, addr)
 }
 
-func (dms *deviceMemoryStateImpl) popNextAvailablePAddrs() uint64  {
-	nextPAddr := dms.availablePAddrs[0]
-	dms.availablePAddrs = dms.availablePAddrs[1:]
-	return  nextPAddr
+func (dms *deviceMemoryStateImpl) popNextAvailablePAddrs() uint64 {
+	if len(dms.recycledPAddrs) > 0 {
+		nextPAddr := dms.recycledPAddrs[0]
+		dms.recycledPAddrs = dms.recycledPAddrs[1:]
+		return nextPAddr
+	}
+
+	if dms.noAvailablePAddrs() {
+		panic("out of memory")
+	}
+	nextPAddr := dms.nextPAddr
+	dms.nextPAddr += uint64(1) << dms.log2PageSize
+	return nextPAddr
 }
 
 func (dms *deviceMemoryStateImpl) noAvailablePAddrs() bool {
-	return len(dms.availablePAddrs) == 0
+	return len(dms.recycledPAddrs) == 0 &&
+		dms.nextPAddr >= dms.initialAddress+dms.storageSize
 }
 
 func (dms *deviceMemoryStateImpl) allocateMultiplePages(

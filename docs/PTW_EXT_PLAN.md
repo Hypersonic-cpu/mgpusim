@@ -1404,7 +1404,7 @@ Update rules:
 
 ## User-requested task status
 
-- [ ] **1. Audit the current code against `docs/PTW_LATPC_EXT.md`.**
+- [x] **1. Audit the current code against `docs/PTW_LATPC_EXT.md`.**
   - Confirm current MMU/GMMU behavior.
   - Confirm address translation and replay behavior.
   - Confirm virtual versus physical address usage throughout the memory hierarchy.
@@ -1412,7 +1412,7 @@ Update rules:
   - Stop if the document materially disagrees with the code.
   - Evidence: `out/ptw-latpc/preflight/current_model_audit.md`
 
-- [ ] **2. Boot the nine workloads in original functional mode under a 12 GiB host-memory limit.**
+- [x] **2. Boot the nine workloads in original functional mode under a 12 GiB host-memory limit.**
   - ATAX
   - BICG
   - FDTD2D
@@ -1425,7 +1425,7 @@ Update rules:
   - Stop if more than four fail.
   - Evidence: `out/ptw-latpc/functional-baseline/summary.md`
 
-- [ ] **3. Implement the configurable address-translation foundation.**
+- [x] **3. Implement the configurable address-translation foundation.**
   - Configurable page-table depth and per-level index bits.
   - Four-level x86-64 baseline with support for up to five levels.
   - 4 KiB pages and 8-byte entries.
@@ -1435,7 +1435,7 @@ Update rules:
   - Required unit tests pass.
   - Commit: `<pending>`
 
-- [ ] **3-b. Implement flag-controlled DPRINTF-style debug logging.**
+- [x] **3-b. Implement flag-controlled DPRINTF-style debug logging.**
   - Named debug categories.
   - Disabled by default.
   - Environment and programmatic control.
@@ -1443,9 +1443,9 @@ Update rules:
   - Thread safety.
   - 20 MiB bounded-log support.
   - Logging unit tests pass.
-  - Commit: `<pending>`
+  - Commit: `15e0e235`
 
-- [ ] **4. Add tests for page-table and VA-to-PA mapping establishment.**
+- [x] **4. Add tests for page-table and VA-to-PA mapping establishment.**
   - Follow existing project test conventions.
   - Test format validation and index extraction.
   - Test linear mapping.
@@ -1455,7 +1455,7 @@ Update rules:
   - Test sparse storage behavior.
   - Evidence: targeted `go test` output.
 
-- [ ] **4-b. Validate mapping establishment with a real workload and debug output.**
+- [x] **4-b. Validate mapping establishment with a real workload and debug output.**
   - Run one passing workload with linear mapping and `VMMap`.
   - Run the same workload with pseudo-randomized mapping and a fixed seed.
   - Confirm printed insertion addresses match expected sequences.
@@ -1526,4 +1526,3 @@ Update rules:
 - [ ] No generated logs, binaries, SQLite files, or unrelated changes were committed.
 - [ ] Commit list and SHAs are recorded in the final Codex report.
 - [ ] LATPC-specific extensions were not implemented.
-

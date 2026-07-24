@@ -2,9 +2,22 @@
 package internal
 
 import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/sarchlab/akita/v5/mem/vm"
+	"github.com/sarchlab/mgpusim/v5/amd/simdebug"
+	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
+)
+
+const (
+	// PhysicalAllocationPolicyEnv selects "linear" or "randomized" mappings.
+	PhysicalAllocationPolicyEnv = "MGPUSIM_PAGE_ALLOC_POLICY"
+	// PhysicalAllocationSeedEnv selects the deterministic randomized seed.
+	PhysicalAllocationSeedEnv = "MGPUSIM_PAGE_ALLOC_SEED"
 )
 
 // A MemoryAllocator can allocate memory on the CPU and GPUs
@@ -29,6 +42,20 @@ func NewMemoryAllocator(
 	pageTable vm.PageTable,
 	log2PageSize uint64,
 ) MemoryAllocator {
+	policy, seed := physicalAllocationConfigFromEnv()
+	return newMemoryAllocator(pageTable, log2PageSize, policy, seed)
+}
+
+func newMemoryAllocator(
+	pageTable vm.PageTable,
+	log2PageSize uint64,
+	policy mgpuvm.AllocationPolicy,
+	seed uint64,
+) *memoryAllocatorImpl {
+	physicalAllocator, err := mgpuvm.NewPhysicalPageAllocator(policy, seed)
+	if err != nil {
+		panic(err)
+	}
 	a := &memoryAllocatorImpl{
 		pageTable:            pageTable,
 		totalStorageByteSize: 1 << log2PageSize, // Starting with a page to avoid 0 address.
@@ -36,8 +63,31 @@ func NewMemoryAllocator(
 		processMemoryStates:  make(map[vm.PID]*processMemoryState),
 		vAddrToPageMapping:   make(map[uint64]vm.Page),
 		devices:              make(map[int]*Device),
+		physicalAllocator:    physicalAllocator,
+		mappingSequence:      make(map[int]uint64),
 	}
 	return a
+}
+
+func physicalAllocationConfigFromEnv() (mgpuvm.AllocationPolicy, uint64) {
+	policy := mgpuvm.LinearAllocation
+	if value := strings.TrimSpace(os.Getenv(PhysicalAllocationPolicyEnv)); value != "" {
+		policy = mgpuvm.AllocationPolicy(value)
+		if value == "pseudo-randomized" {
+			policy = mgpuvm.RandomizedAllocation
+		}
+	}
+
+	seed := uint64(0)
+	if value := strings.TrimSpace(os.Getenv(PhysicalAllocationSeedEnv)); value != "" {
+		parsed, err := strconv.ParseUint(value, 0, 64)
+		if err != nil {
+			panic(fmt.Errorf("parse %s: %w", PhysicalAllocationSeedEnv, err))
+		}
+		seed = parsed
+	}
+
+	return policy, seed
 }
 
 type processMemoryState struct {
@@ -55,6 +105,8 @@ type memoryAllocatorImpl struct {
 	processMemoryStates  map[vm.PID]*processMemoryState
 	devices              map[int]*Device
 	totalStorageByteSize uint64
+	physicalAllocator    *mgpuvm.PhysicalPageAllocator
+	mappingSequence      map[int]uint64
 }
 
 func (a *memoryAllocatorImpl) RegisterDevice(device *Device) {
@@ -63,6 +115,22 @@ func (a *memoryAllocatorImpl) RegisterDevice(device *Device) {
 
 	state := device.MemState
 	state.setInitialAddress(a.totalStorageByteSize)
+
+	if device.Type == DeviceTypeUnifiedGPU {
+		a.devices[device.ID] = device
+		return
+	}
+
+	pageSize := uint64(1) << a.log2PageSize
+	err := a.physicalAllocator.RegisterDeviceRange(mgpuvm.DeviceMemoryRange{
+		DeviceID: device.ID,
+		Base:     a.totalStorageByteSize,
+		Size:     state.getStorageSize(),
+		PageSize: pageSize,
+	})
+	if err != nil {
+		panic(err)
+	}
 
 	a.totalStorageByteSize += state.getStorageSize()
 
@@ -142,13 +210,11 @@ func (a *memoryAllocatorImpl) allocatePages(
 		}
 		pState = a.processMemoryStates[pid]
 	}
-	device := a.devices[deviceID]
-
 	pageSize := uint64(1 << a.log2PageSize)
 	nextVAddr := pState.nextVAddr
 
 	for i := 0; i < numPages; i++ {
-		pAddr := device.allocatePage()
+		pAddr, physicalDeviceID := a.allocatePhysicalPage(deviceID)
 		vAddr := nextVAddr + uint64(i)*pageSize
 
 		page := vm.Page{
@@ -158,13 +224,12 @@ func (a *memoryAllocatorImpl) allocatePages(
 			PageSize: pageSize,
 			Valid:    true,
 			Unified:  unified,
-			DeviceID: uint64(a.deviceIDByPAddr(pAddr)),
+			DeviceID: uint64(physicalDeviceID),
 		}
 
-		// fmt.Printf("page.addr is %x piage Device ID is %d \n", page.PAddr, page.DeviceID)
-		// debug.PrintStack()
 		a.pageTable.Insert(page)
 		a.vAddrToPageMapping[page.VAddr] = page
+		a.logMapping(page, physicalDeviceID)
 	}
 
 	pState.nextVAddr += pageSize * uint64(numPages)
@@ -206,10 +271,12 @@ func (a *memoryAllocatorImpl) removePage(vAddr uint64) {
 	}
 
 	deviceID := a.deviceIDByPAddr(page.PAddr)
-	dState := a.devices[deviceID].MemState
-	dState.addSinglePAddr(page.PAddr)
+	if err := a.physicalAllocator.FreePage(deviceID, page.PAddr); err != nil {
+		panic(err)
+	}
 
 	a.pageTable.Remove(page.PID, page.VAddr)
+	delete(a.vAddrToPageMapping, page.VAddr)
 }
 
 func (a *memoryAllocatorImpl) AllocatePageWithGivenVAddr(
@@ -232,8 +299,7 @@ func (a *memoryAllocatorImpl) allocatePageWithGivenVAddr(
 ) vm.Page {
 	pageSize := uint64(1 << a.log2PageSize)
 
-	device := a.devices[deviceID]
-	pAddr := device.allocatePage()
+	pAddr, physicalDeviceID := a.allocatePhysicalPage(deviceID)
 
 	page := vm.Page{
 		PID:      pid,
@@ -241,11 +307,12 @@ func (a *memoryAllocatorImpl) allocatePageWithGivenVAddr(
 		PAddr:    pAddr,
 		PageSize: pageSize,
 		Valid:    true,
-		DeviceID: uint64(deviceID),
+		DeviceID: uint64(physicalDeviceID),
 		Unified:  isUnified,
 	}
 	a.vAddrToPageMapping[page.VAddr] = page
 	a.pageTable.Update(page)
+	a.logMapping(page, physicalDeviceID)
 
 	return page
 }
@@ -258,21 +325,20 @@ func (a *memoryAllocatorImpl) allocateMultiplePagesWithGivenVAddrs(
 ) (pages []vm.Page) {
 	pageSize := uint64(1 << a.log2PageSize)
 
-	device := a.devices[deviceID]
-	pAddrs := device.allocateMultiplePages(len(vAddrs))
-
-	for i, vAddr := range vAddrs {
+	for _, vAddr := range vAddrs {
+		pAddr, physicalDeviceID := a.allocatePhysicalPage(deviceID)
 		page := vm.Page{
 			PID:      pid,
 			VAddr:    vAddr,
-			PAddr:    pAddrs[i],
+			PAddr:    pAddr,
 			PageSize: pageSize,
 			Valid:    true,
-			DeviceID: uint64(deviceID),
+			DeviceID: uint64(physicalDeviceID),
 			Unified:  isUnified,
 		}
 		a.vAddrToPageMapping[page.VAddr] = page
 		a.pageTable.Update(page)
+		a.logMapping(page, physicalDeviceID)
 		pages = append(pages, page)
 	}
 
@@ -284,4 +350,52 @@ func (a *memoryAllocatorImpl) Free(ptr uint64) {
 	defer a.Unlock()
 
 	a.removePage(ptr)
+}
+
+func (a *memoryAllocatorImpl) allocatePhysicalPage(deviceID int) (uint64, int) {
+	device, ok := a.devices[deviceID]
+	if !ok {
+		panic(fmt.Sprintf("device %d not found", deviceID))
+	}
+
+	if device.Type != DeviceTypeUnifiedGPU {
+		pAddr, err := a.physicalAllocator.AllocatePage(deviceID)
+		if err != nil {
+			panic(err)
+		}
+		return pAddr, deviceID
+	}
+
+	for range device.ActualGPUs {
+		index := device.nextActualGPUIndex % len(device.ActualGPUs)
+		actualDeviceID := device.ActualGPUs[index].ID
+		device.nextActualGPUIndex = (index + 1) % len(device.ActualGPUs)
+		pAddr, err := a.physicalAllocator.AllocatePage(actualDeviceID)
+		if err == nil {
+			return pAddr, actualDeviceID
+		}
+	}
+
+	panic("out of memory")
+}
+
+func (a *memoryAllocatorImpl) logMapping(page vm.Page, deviceID int) {
+	if !simdebug.Enabled(simdebug.VMMap) {
+		return
+	}
+
+	sequence := a.mappingSequence[deviceID]
+	a.mappingSequence[deviceID]++
+	simdebug.DPrintf(
+		simdebug.VMMap,
+		"pid=%d dev=%d policy=%s seq=%d va=0x%x pa=0x%x size=%d seed=%d",
+		page.PID,
+		deviceID,
+		a.physicalAllocator.Policy(),
+		sequence,
+		page.VAddr,
+		page.PAddr,
+		page.PageSize,
+		a.physicalAllocator.Seed(),
+	)
 }
