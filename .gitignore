@@ -64,6 +64,7 @@ im2col
 _sim_benchmarks/
 stencil2d_bench
 _akita_local/
+out/ptw-latpc/
 
 # hipcc linker intermediate
 *.resolution.txt
