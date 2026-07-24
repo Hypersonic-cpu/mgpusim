@@ -10,6 +10,7 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/insts"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/wavefront"
+	mgpuvm "github.com/sarchlab/mgpusim/v5/amd/vm"
 )
 
 type vectorMemInst struct {
@@ -343,6 +344,7 @@ func (u *VectorMemoryUnit) registerTranslationGroup(
 		return
 	}
 	count := uint16(len(transactions))
+	members := make([]latpc.GroupMember, len(transactions))
 	for i := range transactions {
 		transaction := &transactions[i]
 		member := latpc.GroupMember{
@@ -354,12 +356,19 @@ func (u *VectorMemoryUnit) registerTranslationGroup(
 		if transaction.Read != nil {
 			member.VAddr = transaction.Read.Address
 			member.RequestID = transaction.Read.ID
-			latpc.RegisterRequestMetadata(transaction.Read.ID, member)
 		} else {
 			member.VAddr = transaction.Write.Address
 			member.RequestID = transaction.Write.ID
-			latpc.RegisterRequestMetadata(transaction.Write.ID, member)
 		}
+		members[i] = member
+	}
+	detector, err := latpc.NewDetector(mgpuvm.X86FourLevel4KFormat())
+	if err != nil {
+		panic(err)
+	}
+	members = detector.AnnotateGroupMembers(members)
+	for _, member := range members {
+		latpc.RegisterRequestMetadata(member.RequestID, member)
 	}
 }
 

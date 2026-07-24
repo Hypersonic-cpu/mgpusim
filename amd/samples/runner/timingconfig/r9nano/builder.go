@@ -62,19 +62,21 @@ type Builder struct {
 	driverPort                     messaging.RemotePort
 	translationConfig              latpc.Config
 
-	gpu                *gpubuilder.GPU
-	cp                 *cp.Comp
-	rdmaEngine         *rdma.Comp
-	dmaEngine          *cp.DMAComp
-	sas                []*shaderarray.ShaderArray
-	l2Caches           []*writeback.Comp
-	l2TLBs             []*tlb.Comp
-	drams              []messaging.Component
-	internalConn       *directconnection.Comp
-	l2ToDramConnection *directconnection.Comp
-	l1AddressMapper    *mem.InterleavedAddressPortMapper
-	l1TLBAddressMapper *mem.SinglePortMapper
-	dmaLocalDataSource *mem.InterleavedAddressPortMapper
+	gpu                   *gpubuilder.GPU
+	cp                    *cp.Comp
+	rdmaEngine            *rdma.Comp
+	dmaEngine             *cp.DMAComp
+	sas                   []*shaderarray.ShaderArray
+	l2Caches              []*writeback.Comp
+	l2TLBs                []*tlb.Comp
+	latp                  *latpc.LATPComp
+	drams                 []messaging.Component
+	internalConn          *directconnection.Comp
+	l2ToDramConnection    *directconnection.Comp
+	l2TLBToLATPConnection *directconnection.Comp
+	l1AddressMapper       *mem.InterleavedAddressPortMapper
+	l1TLBAddressMapper    *mem.SinglePortMapper
+	dmaLocalDataSource    *mem.InterleavedAddressPortMapper
 }
 
 // MakeBuilder creates a new builder.
@@ -234,6 +236,7 @@ func (b Builder) Build(name string) *gpubuilder.GPU {
 	b.buildDRAMControllers()
 	b.buildL2Caches()
 	b.buildCP()
+	b.buildLATP()
 	b.buildL2TLB()
 	b.buildSAs()
 
@@ -241,6 +244,7 @@ func (b Builder) Build(name string) *gpubuilder.GPU {
 	b.connectL2AndDRAM()
 	b.connectL1ToL2()
 	b.connectL1TLBToL2TLB()
+	b.connectL2TLBToLATP()
 
 	b.populateGPU()
 
@@ -275,8 +279,15 @@ func (b *Builder) populateGPU() {
 	}
 
 	for _, l2TLB := range b.l2TLBs {
-		b.gpu.TranslationPorts = append(b.gpu.TranslationPorts,
-			l2TLB.GetPortByName("Bottom"))
+		if b.latp == nil {
+			b.gpu.TranslationPorts = append(b.gpu.TranslationPorts,
+				l2TLB.GetPortByName("Bottom"))
+		}
+	}
+	if b.latp != nil {
+		b.gpu.TranslationPorts = append(
+			b.gpu.TranslationPorts,
+			b.latp.GetPortByName(latpc.LATPBottomPortName))
 	}
 }
 
@@ -371,6 +382,9 @@ func (b *Builder) connectCPWithTLBs() {
 
 	for _, l2TLB := range b.l2TLBs {
 		addTLB(l2TLB)
+	}
+	if b.latp != nil {
+		addTLB(b.latp)
 	}
 
 	// The GMMU shares the TLB shootdown lifecycle so a mapping change also
@@ -486,6 +500,20 @@ func (b *Builder) connectL1TLBToL2TLB() {
 		tlbConn.PlugIn(sa.L1STLB.GetPortByName("Bottom"))
 		tlbConn.PlugIn(sa.L1ITLB.GetPortByName("Bottom"))
 	}
+}
+
+func (b *Builder) connectL2TLBToLATP() {
+	if b.latp == nil {
+		return
+	}
+	b.l2TLBToLATPConnection = directconnection.MakeBuilder().
+		WithRegistrar(b.simulation).
+		WithSpec(directconnection.Spec{Freq: b.freq}).
+		Build(b.name + ".L2TLBToLATP")
+	b.l2TLBToLATPConnection.PlugIn(
+		b.l2TLBs[0].GetPortByName("Bottom"))
+	b.l2TLBToLATPConnection.PlugIn(
+		b.latp.GetPortByName(latpc.LATPTopPortName))
 }
 
 func (b *Builder) buildSAs() {
@@ -726,7 +754,7 @@ func (b *Builder) buildL2TLB() {
 		WithSpec(spec).
 		WithResources(tlb.Resources{
 			TranslationProviderMapper: &mem.SinglePortMapper{
-				Port: b.mmu.GetPortByName(detailedgmmu.TopPortName).AsRemote(),
+				Port: b.l2MissProvider(),
 			},
 		}).
 		Build(fmt.Sprintf("%s.L2TLB", b.name))
@@ -741,4 +769,37 @@ func (b *Builder) buildL2TLB() {
 	b.l2TLBs = append(b.l2TLBs, l2TLB)
 
 	b.l1TLBAddressMapper.Port = l2TLB.GetPortByName("Top").AsRemote()
+}
+
+func (b *Builder) l2MissProvider() messaging.RemotePort {
+	if b.latp != nil {
+		return b.latp.GetPortByName(latpc.LATPTopPortName).AsRemote()
+	}
+	return b.mmu.GetPortByName(detailedgmmu.TopPortName).AsRemote()
+}
+
+func (b *Builder) buildLATP() {
+	if !b.translationConfig.Mode.Mechanisms().LATP {
+		return
+	}
+	resources := b.translationConfig.Resources
+	spec := latpc.LATPSpec{
+		Freq:           b.freq,
+		Entries:        resources.PWQEntries,
+		NumReqPerCycle: resources.L2TLBPorts,
+		BatchWindow:    4,
+		NumUpperLevels: 3,
+	}
+	b.latp = latpc.MakeLATPBuilder().
+		WithRegistrar(b.simulation).
+		WithSpec(spec).
+		WithResources(latpc.LATPResources{
+			TranslationProviderMapper: &mem.SinglePortMapper{
+				Port: b.mmu.GetPortByName(detailedgmmu.TopPortName).AsRemote(),
+			},
+		}).
+		Build(b.name + ".LATP")
+	b.buildPort(b.latp, latpc.LATPTopPortName, l2TLBPortBufSize)
+	b.buildPort(b.latp, latpc.LATPBottomPortName, l2TLBPortBufSize)
+	b.buildPort(b.latp, latpc.LATPControlPortName, ctrlPortBufSize)
 }

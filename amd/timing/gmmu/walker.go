@@ -89,17 +89,22 @@ func (f TranslationFaultError) Error() string {
 // Stats reports deterministic walker and PWC activity.
 type Stats struct {
 	// TranslationRequests is the number of L2-TLB misses accepted by the GMMU.
-	TranslationRequests uint64
-	WalksStarted        uint64
-	RequestsAccepted    uint64
-	RequestsRejected    uint64
-	PWQFullStalls       uint64
-	WalksCompleted      uint64
-	Faults              uint64
-	MemoryReads         uint64
-	PTWBytes            uint64
-	MemoryResponses     uint64
-	PTECoherenceRepairs uint64
+	TranslationRequests     uint64
+	WalksStarted            uint64
+	RequestsAccepted        uint64
+	RequestsRejected        uint64
+	PWQFullStalls           uint64
+	WalksCompleted          uint64
+	Faults                  uint64
+	MemoryReads             uint64
+	PTWBytes                uint64
+	MemoryResponses         uint64
+	PTECoherenceRepairs     uint64
+	LATPGroups              uint64
+	LATPMembers             uint64
+	IndependentWalksAvoided uint64
+	UpperReadsAvoided       uint64
+	LeafPTEReads            uint64
 
 	PWQQueueDelay        timing.VTimeInPicoSec
 	WalkerBusyTime       timing.VTimeInPicoSec
@@ -181,6 +186,9 @@ type WalkerState struct {
 	inheritedRW      bool
 	inheritedUser    bool
 	inheritedNX      bool
+	GroupReqs        []WalkRequest
+	GroupIndex       int
+	GroupOutstanding int
 }
 
 // Core is a cycle-independent detailed walker engine. A component wrapper
@@ -196,13 +204,18 @@ type Core struct {
 	outgoing     []MemoryRead
 	completed    []Translation
 	faults       []TranslationFaultError
-	reqToWalker  map[uint64]int
+	reqToWalker  map[uint64]memoryTarget
 	submittedAt  map[uint64]timing.VTimeInPicoSec
 	memoryIssued map[uint64]timing.VTimeInPicoSec
 	nextMemoryID uint64
 	currentTime  timing.VTimeInPicoSec
 	paused       bool
 	draining     bool
+}
+
+type memoryTarget struct {
+	WalkerIndex int
+	GroupMember int
 }
 
 // NewCore creates a detailed walker with N-1 intermediate PWCs.
@@ -225,7 +238,7 @@ func NewCore(config Config, table *mgpuvm.RadixPageTable) (*Core, error) {
 		Table:        table,
 		Walkers:      make([]WalkerState, config.NumWalkers),
 		pwcs:         make([]pageWalkCache, int(config.Format.NumLevels)-1),
-		reqToWalker:  make(map[uint64]int),
+		reqToWalker:  make(map[uint64]memoryTarget),
 		submittedAt:  make(map[uint64]timing.VTimeInPicoSec),
 		memoryIssued: make(map[uint64]timing.VTimeInPicoSec),
 		nextMemoryID: 1,
@@ -305,7 +318,7 @@ func (c *Core) CompleteMemoryReadAt(
 ) error {
 	c.AdvanceTime(now)
 	now = c.currentTime
-	walkerIndex, ok := c.reqToWalker[requestID]
+	target, ok := c.reqToWalker[requestID]
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrUnknownMemoryResponse, requestID)
 	}
@@ -315,7 +328,12 @@ func (c *Core) CompleteMemoryReadAt(
 	c.Stats.MemoryResponses++
 	c.Stats.PTWMemoryLatency += now - issuedAt
 
+	walkerIndex := target.WalkerIndex
 	walker := &c.Walkers[walkerIndex]
+	if target.GroupMember >= 0 {
+		return c.completeGroupLeafRead(
+			walkerIndex, target.GroupMember, requestID, data)
+	}
 	if !walker.Busy || !walker.WaitingMemory ||
 		walker.OutstandingReqID != requestID {
 		return fmt.Errorf("%w: %d", ErrUnknownMemoryResponse, requestID)
@@ -495,9 +513,11 @@ func (c *Core) dispatch() {
 		if c.Walkers[walkerIndex].Busy {
 			continue
 		}
-		req := c.pwq[0]
-		c.pwq = c.pwq[1:]
-		c.startWalker(walkerIndex, req)
+		requests, ready := c.takeNextWalkGroup()
+		if !ready {
+			break
+		}
+		c.startWalker(walkerIndex, requests)
 	}
 	busy := c.busyWalkers()
 	if busy > c.Stats.PeakWalkersBusy {
@@ -505,7 +525,37 @@ func (c *Core) dispatch() {
 	}
 }
 
-func (c *Core) startWalker(walkerIndex int, req WalkRequest) {
+func (c *Core) takeNextWalkGroup() ([]WalkRequest, bool) {
+	head := c.pwq[0]
+	count := int(head.Group.LATPBatchCount)
+	if !head.HasGroup || count <= 1 || head.Group.LATPBatchID == 0 {
+		c.pwq = c.pwq[1:]
+		return []WalkRequest{head}, true
+	}
+	requests := make([]WalkRequest, 0, count)
+	for _, req := range c.pwq {
+		if req.HasGroup &&
+			req.Group.LATPBatchID == head.Group.LATPBatchID {
+			requests = append(requests, req)
+		}
+	}
+	if len(requests) < count {
+		return nil, false
+	}
+	remaining := c.pwq[:0]
+	for _, req := range c.pwq {
+		if req.HasGroup &&
+			req.Group.LATPBatchID == head.Group.LATPBatchID {
+			continue
+		}
+		remaining = append(remaining, req)
+	}
+	c.pwq = remaining
+	return requests, true
+}
+
+func (c *Core) startWalker(walkerIndex int, requests []WalkRequest) {
+	req := requests[0]
 	indices, err := c.Config.Format.ExtractIndices(req.VAddr)
 	if err != nil {
 		c.faults = append(c.faults, TranslationFaultError{
@@ -534,9 +584,20 @@ func (c *Core) startWalker(walkerIndex int, req WalkRequest) {
 		StartedAt:     c.currentTime,
 		inheritedRW:   true,
 		inheritedUser: true,
+		GroupReqs:     requests,
 	}
-	delete(c.submittedAt, req.ID)
+	for _, memberReq := range requests {
+		delete(c.submittedAt, memberReq.ID)
+	}
 	c.Stats.WalksStarted++
+	if len(requests) > 1 {
+		saved := uint64(len(requests) - 1)
+		c.Stats.LATPGroups++
+		c.Stats.LATPMembers += uint64(len(requests))
+		c.Stats.IndependentWalksAvoided += saved
+		c.Stats.UpperReadsAvoided +=
+			saved * uint64(c.Config.Format.NumLevels-1)
+	}
 	c.Stats.PWQQueueDelay += c.currentTime - c.Walkers[walkerIndex].SubmittedAt
 	c.Walkers[walkerIndex].TablePAddrs[0] = addressSpace.RootPAddr
 	simdebug.DPrintf(
@@ -582,6 +643,10 @@ func (c *Core) advanceWalker(walkerIndex int) {
 		walker.CurrentLevel++
 		walker.TablePAddrs[walker.CurrentLevel] = value.ChildTablePAddr
 	}
+	if len(walker.GroupReqs) > 1 {
+		c.issueGroupLeafReads(walkerIndex)
+		return
+	}
 	c.issueRead(walkerIndex)
 }
 
@@ -600,7 +665,10 @@ func (c *Core) issueRead(walkerIndex int) {
 	walker.WaitingMemory = true
 	walker.OutstandingReqID = requestID
 	walker.Reads++
-	c.reqToWalker[requestID] = walkerIndex
+	c.reqToWalker[requestID] = memoryTarget{
+		WalkerIndex: walkerIndex,
+		GroupMember: -1,
+	}
 	c.memoryIssued[requestID] = c.currentTime
 	c.outgoing = append(c.outgoing, MemoryRead{
 		ID:           requestID,
@@ -612,27 +680,145 @@ func (c *Core) issueRead(walkerIndex int) {
 	})
 	c.Stats.MemoryReads++
 	c.Stats.PTWBytes += uint64(c.Config.Format.EntryBytes)
+	if len(walker.GroupReqs) > 1 &&
+		level == c.Config.Format.NumLevels-1 {
+		c.Stats.LeafPTEReads++
+	}
+}
+
+func (c *Core) issueGroupLeafReads(walkerIndex int) {
+	walker := &c.Walkers[walkerIndex]
+	level := c.Config.Format.NumLevels - 1
+	walker.WaitingMemory = true
+	for memberIndex, req := range walker.GroupReqs {
+		indices, err := c.Config.Format.ExtractIndices(req.VAddr)
+		if err != nil {
+			c.appendFault(req, level, err.Error())
+			continue
+		}
+		entryPAddr, err := c.Config.Format.EntryAddress(
+			walker.TablePAddrs[level], level, indices[level])
+		if err != nil {
+			c.appendFault(req, level, err.Error())
+			continue
+		}
+		requestID := c.nextMemoryID
+		c.nextMemoryID++
+		walker.GroupOutstanding++
+		walker.Reads++
+		c.reqToWalker[requestID] = memoryTarget{
+			WalkerIndex: walkerIndex,
+			GroupMember: memberIndex,
+		}
+		c.memoryIssued[requestID] = c.currentTime
+		c.outgoing = append(c.outgoing, MemoryRead{
+			ID:           requestID,
+			Walker:       walkerIndex,
+			PID:          req.PID,
+			PAddr:        entryPAddr,
+			ByteSize:     uint64(c.Config.Format.EntryBytes),
+			TrafficClass: PTETrafficClass,
+		})
+		c.Stats.MemoryReads++
+		c.Stats.PTWBytes += uint64(c.Config.Format.EntryBytes)
+		c.Stats.LeafPTEReads++
+	}
+	if walker.GroupOutstanding == 0 {
+		c.finishWalker(walkerIndex)
+	}
+}
+
+func (c *Core) completeGroupLeafRead(
+	walkerIndex, memberIndex int,
+	requestID uint64,
+	data []byte,
+) error {
+	walker := &c.Walkers[walkerIndex]
+	if !walker.Busy || !walker.WaitingMemory ||
+		memberIndex < 0 || memberIndex >= len(walker.GroupReqs) {
+		return fmt.Errorf("%w: %d", ErrUnknownMemoryResponse, requestID)
+	}
+	req := walker.GroupReqs[memberIndex]
+	level := c.Config.Format.NumLevels - 1
+	indices, err := c.Config.Format.ExtractIndices(req.VAddr)
+	if err != nil {
+		c.appendFault(req, level, err.Error())
+		return c.finishGroupLeafResponse(walkerIndex)
+	}
+	entryPAddr, err := c.Config.Format.EntryAddress(
+		walker.TablePAddrs[level], level, indices[level])
+	if err != nil {
+		c.appendFault(req, level, err.Error())
+		return c.finishGroupLeafResponse(walkerIndex)
+	}
+	if len(data) != int(c.Config.Format.EntryBytes) {
+		c.appendFault(req, level, "memory response has invalid entry size")
+		return c.finishGroupLeafResponse(walkerIndex)
+	}
+	if coherentData, repaired := c.Table.ResolveCoherentEntryData(
+		entryPAddr, data); repaired {
+		data = coherentData
+		c.Stats.PTECoherenceRepairs++
+	}
+	entry, err := decodePTEData(data)
+	if err != nil {
+		c.appendFault(req, level, err.Error())
+		return c.finishGroupLeafResponse(walkerIndex)
+	}
+	if !entry.Present {
+		c.appendFault(req, level, "non-present entry")
+		return c.finishGroupLeafResponse(walkerIndex)
+	}
+	if !c.permissionsAllowAccess(walker, entry, req.Access) {
+		c.appendFault(req, level, "permission denied")
+		return c.finishGroupLeafResponse(walkerIndex)
+	}
+	c.appendTranslation(req, entry.PhysicalBase, 1)
+	return c.finishGroupLeafResponse(walkerIndex)
+}
+
+func (c *Core) finishGroupLeafResponse(walkerIndex int) error {
+	walker := &c.Walkers[walkerIndex]
+	walker.GroupOutstanding--
+	if walker.GroupOutstanding == 0 {
+		walker.WaitingMemory = false
+		c.finishWalker(walkerIndex)
+	}
+	return nil
 }
 
 func (c *Core) completeWalker(walkerIndex int, physicalBase uint64) {
 	walker := &c.Walkers[walkerIndex]
+	c.appendTranslation(walker.Req, physicalBase, walker.Reads)
+	c.finishWalker(walkerIndex)
+}
+
+func (c *Core) appendTranslation(
+	req WalkRequest,
+	physicalBase uint64,
+	reads uint64,
+) {
 	pageSize := uint64(1) << c.Config.Format.PageOffsetBits
-	page, ok := c.Table.MappingMetadata(walker.Req.PID, walker.Req.VAddr)
+	page, ok := c.Table.MappingMetadata(req.PID, req.VAddr)
 	if !ok {
 		page = akitavm.Page{
-			PID:      walker.Req.PID,
-			VAddr:    walker.Req.VAddr &^ (pageSize - 1),
+			PID:      req.PID,
+			VAddr:    req.VAddr &^ (pageSize - 1),
 			PageSize: pageSize,
-			DeviceID: walker.Req.DeviceID,
+			DeviceID: req.DeviceID,
 			Valid:    true,
 		}
 	}
 	page.PAddr = physicalBase
 	c.completed = append(c.completed, Translation{
-		RequestID: walker.Req.ID,
+		RequestID: req.ID,
 		Page:      page,
-		Reads:     walker.Reads,
+		Reads:     reads,
 	})
+}
+
+func (c *Core) finishWalker(walkerIndex int) {
+	walker := &c.Walkers[walkerIndex]
 	c.Stats.WalksCompleted++
 	c.Stats.WalkLatency += c.currentTime - walker.StartedAt
 	if walker.Reads <= mgpuvm.MaxPageTableLevels {
@@ -660,24 +846,66 @@ func walkLatencyBucket(latency timing.VTimeInPicoSec) int {
 
 func (c *Core) failWalker(walkerIndex int, reason string) {
 	walker := &c.Walkers[walkerIndex]
-	c.faults = append(c.faults, TranslationFaultError{
-		RequestID: walker.Req.ID,
-		PID:       walker.Req.PID,
-		VAddr:     walker.Req.VAddr,
-		Level:     walker.CurrentLevel,
-		Reason:    reason,
-	})
-	c.Stats.Faults++
+	if len(walker.GroupReqs) > 1 &&
+		walker.CurrentLevel == c.Config.Format.NumLevels-1 {
+		c.appendFault(walker.Req, walker.CurrentLevel, reason)
+		if walker.GroupIndex+1 < len(walker.GroupReqs) {
+			walker.GroupIndex++
+			walker.Req = walker.GroupReqs[walker.GroupIndex]
+			indices, err := c.Config.Format.ExtractIndices(walker.Req.VAddr)
+			if err != nil {
+				c.appendFault(walker.Req, walker.CurrentLevel, err.Error())
+				c.finishWalker(walkerIndex)
+				return
+			}
+			walker.Indices = indices
+			c.issueRead(walkerIndex)
+			return
+		}
+		c.finishWalker(walkerIndex)
+		return
+	}
+	if len(walker.GroupReqs) > 1 {
+		for _, req := range walker.GroupReqs {
+			c.appendFault(req, walker.CurrentLevel, reason)
+		}
+		c.finishWalker(walkerIndex)
+		return
+	}
+	c.appendFault(walker.Req, walker.CurrentLevel, reason)
 	c.Walkers[walkerIndex] = WalkerState{}
 	c.dispatch()
 }
 
+func (c *Core) appendFault(
+	req WalkRequest,
+	level uint8,
+	reason string,
+) {
+	c.faults = append(c.faults, TranslationFaultError{
+		RequestID: req.ID,
+		PID:       req.PID,
+		VAddr:     req.VAddr,
+		Level:     level,
+		Reason:    reason,
+	})
+	c.Stats.Faults++
+}
+
 func (c *Core) permissionsAllow(walker *WalkerState, entry mgpuvm.PTE) bool {
-	if walker.Req.Access == AccessWrite &&
+	return c.permissionsAllowAccess(walker, entry, walker.Req.Access)
+}
+
+func (c *Core) permissionsAllowAccess(
+	walker *WalkerState,
+	entry mgpuvm.PTE,
+	access AccessType,
+) bool {
+	if access == AccessWrite &&
 		(!walker.inheritedRW || !entry.ReadWrite) {
 		return false
 	}
-	if walker.Req.Access == AccessExecute &&
+	if access == AccessExecute &&
 		(walker.inheritedNX || entry.NoExecute) {
 		return false
 	}

@@ -81,6 +81,35 @@ func (d Detector) Detect(members []GroupMember) DetectionResult {
 	return result
 }
 
+// AnnotateGroupMembers attaches detector output to every raw transaction.
+// Duplicate-VPN transactions receive the same unique-translation position.
+func (d Detector) AnnotateGroupMembers(members []GroupMember) []GroupMember {
+	annotated := append([]GroupMember(nil), members...)
+	result := d.Detect(annotated)
+	byPosition := make(map[uint16]int, len(annotated))
+	for index := range annotated {
+		byPosition[annotated[index].Position] = index
+	}
+	for groupIndex, group := range result.Groups {
+		if !group.Regular {
+			continue
+		}
+		for memberIndex, member := range group.Members {
+			for _, rawPosition := range member.Positions {
+				index := byPosition[rawPosition]
+				annotated[index].Regular = true
+				annotated[index].GroupIndex = uint16(groupIndex)
+				annotated[index].GroupPosition = uint16(memberIndex)
+				annotated[index].GroupCount = uint16(len(group.Members))
+				annotated[index].BaseVPN = group.BaseVPN
+				annotated[index].Stride = group.Stride
+				annotated[index].LeafPage = group.LeafPage
+			}
+		}
+	}
+	return annotated
+}
+
 func (d Detector) mergeDuplicateVPNs(
 	ordered []GroupMember,
 ) []TranslationMember {

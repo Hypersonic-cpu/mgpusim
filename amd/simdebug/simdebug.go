@@ -37,6 +37,8 @@ const (
 	LATPCDetector Flag = "LATPCDetector"
 	// LATC reports compressed L1-TLB MSHR allocation and release.
 	LATC Flag = "LATC"
+	// LATP reports grouped page-walk batches.
+	LATP Flag = "LATP"
 )
 
 var (
@@ -51,6 +53,7 @@ var knownFlags = map[Flag]struct{}{
 	TLBReplay: {}, TLBFill: {}, Fault: {},
 	LATPCDetector: {},
 	LATC:          {},
+	LATP:          {},
 }
 
 // Config controls debug-log categories and destination. Exactly one of Writer

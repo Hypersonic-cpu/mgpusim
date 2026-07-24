@@ -136,3 +136,18 @@ func TestDetectorBypassModes(t *testing.T) {
 		t.Fatal("LATPC mechanism modes must enable detector")
 	}
 }
+
+func TestDetectorAnnotatesEveryDuplicateWaiter(t *testing.T) {
+	detector := fourLevelDetector(t)
+	members := detector.AnnotateGroupMembers(makeMembers(10, 10, 11, 12))
+	for i, member := range members {
+		if !member.Regular || member.GroupCount != 3 ||
+			member.BaseVPN != 10 || member.Stride != 1 {
+			t.Fatalf("member %d annotation: %+v", i, member)
+		}
+	}
+	if members[0].GroupPosition != 0 || members[1].GroupPosition != 0 ||
+		members[2].GroupPosition != 1 || members[3].GroupPosition != 2 {
+		t.Fatalf("duplicate positions: %+v", members)
+	}
+}

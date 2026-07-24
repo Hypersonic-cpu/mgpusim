@@ -11,12 +11,21 @@ import (
 // wavefront instruction. Position and Count preserve the instruction-local
 // order and boundary; LaneMask preserves the originating wave64 lanes.
 type GroupMember struct {
-	InstructionID uint64
-	RequestID     uint64
-	Position      uint16
-	Count         uint16
-	VAddr         uint64
-	LaneMask      uint64
+	InstructionID  uint64
+	RequestID      uint64
+	Position       uint16
+	Count          uint16
+	VAddr          uint64
+	LaneMask       uint64
+	Regular        bool
+	GroupIndex     uint16
+	GroupPosition  uint16
+	GroupCount     uint16
+	BaseVPN        uint64
+	Stride         int64
+	LeafPage       uint64
+	LATPBatchID    uint64
+	LATPBatchCount uint16
 }
 
 // Last reports whether this is the final transaction from the instruction.
@@ -101,6 +110,22 @@ func RequestMetadata(requestID uint64) (GroupMember, bool) {
 // ReleaseRequestMetadata ends tracking at a terminal translation component.
 func ReleaseRequestMetadata(requestID uint64) {
 	runtimeMetadata.Delete(requestID)
+}
+
+// MarkLATPBatch annotates the current downstream request IDs that one grouped
+// page-table walker must service together.
+func MarkLATPBatch(requestIDs []uint64, batchID uint64) {
+	runtimeMetadata.mu.Lock()
+	defer runtimeMetadata.mu.Unlock()
+	for _, requestID := range requestIDs {
+		member, ok := runtimeMetadata.members[requestID]
+		if !ok {
+			continue
+		}
+		member.LATPBatchID = batchID
+		member.LATPBatchCount = uint16(len(requestIDs))
+		runtimeMetadata.members[requestID] = member
+	}
 }
 
 type metadataBridge struct {

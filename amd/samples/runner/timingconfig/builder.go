@@ -112,6 +112,7 @@ func (b Builder) Build() *driver.Driver {
 	latpc.ResetRuntimeMetadata()
 	latpc.ResetRuntimeDetector(mgpuvm.X86FourLevel4KFormat())
 	latpc.ResetLATCRegistry()
+	latpc.ResetLATPRegistry()
 	b.adjustConfigForGPUType()
 	b.cpuGPUMemSizeMustEqual()
 

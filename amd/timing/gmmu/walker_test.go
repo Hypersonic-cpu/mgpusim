@@ -521,3 +521,83 @@ func TestIdealModeBypassesDetailedWalk(t *testing.T) {
 		t.Fatalf("ideal mode used detailed walker: %+v", core.Stats)
 	}
 }
+
+func TestLATPBatchSharesUpperTraversal(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	for i := uint64(0); i < 3; i++ {
+		mapPage(table, 1, (10+i)*4096, (100+i)*4096)
+	}
+	for i := uint64(0); i < 3; i++ {
+		member := latpc.GroupMember{
+			InstructionID:  1,
+			RequestID:      i + 1,
+			Regular:        true,
+			GroupCount:     3,
+			GroupPosition:  uint16(i),
+			LATPBatchID:    9,
+			LATPBatchCount: 3,
+		}
+		if err := core.Submit(WalkRequest{
+			ID:       i + 1,
+			PID:      1,
+			VAddr:    (10 + i) * 4096,
+			Group:    member,
+			HasGroup: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	finishCore(t, core)
+
+	translations := core.DrainTranslations()
+	if len(translations) != 3 {
+		t.Fatalf("translations: %+v", translations)
+	}
+	stats := core.Stats
+	if stats.MemoryReads != 6 || stats.WalksStarted != 1 ||
+		stats.WalksCompleted != 1 || stats.LATPGroups != 1 ||
+		stats.LATPMembers != 3 || stats.IndependentWalksAvoided != 2 ||
+		stats.UpperReadsAvoided != 6 || stats.LeafPTEReads != 3 {
+		t.Fatalf("grouped-walk statistics: %+v", stats)
+	}
+}
+
+func TestLATPLeafResponsesMayCompleteOutOfOrder(t *testing.T) {
+	core, table := makeCore(t, mgpuvm.X86FourLevel4KFormat(), nil)
+	for i := uint64(0); i < 3; i++ {
+		mapPage(table, 1, (20+i)*4096, (200+i)*4096)
+		if err := core.Submit(WalkRequest{
+			ID:    i + 1,
+			PID:   1,
+			VAddr: (20 + i) * 4096,
+			Group: latpc.GroupMember{
+				LATPBatchID:    4,
+				LATPBatchCount: 3,
+			},
+			HasGroup: true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for level := 0; level < 3; level++ {
+		reads := core.DrainMemoryReads()
+		if len(reads) != 1 {
+			t.Fatalf("upper level %d reads: %+v", level, reads)
+		}
+		completeReads(t, core, reads)
+	}
+	leafReads := core.DrainMemoryReads()
+	if len(leafReads) != 3 {
+		t.Fatalf("leaf reads were not issued in parallel: %+v", leafReads)
+	}
+	for i := len(leafReads) - 1; i >= 0; i-- {
+		completeReads(t, core, leafReads[i:i+1])
+	}
+	if translations := core.DrainTranslations(); len(translations) != 3 {
+		t.Fatalf("out-of-order leaf completions: %+v", translations)
+	}
+	if !core.IsDrained() {
+		t.Fatal("grouped walker did not drain")
+	}
+}
