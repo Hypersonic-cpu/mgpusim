@@ -1462,9 +1462,9 @@ Update rules:
   - Keep each log below 20 MiB.
   - Verify application correctness in both runs.
   - Evidence: `out/ptw-latpc/mapping-trace/validation.md`
-  - Commit: `<pending>`
+  - Commit: `97baffca`
 
-- [-] **5. Implement the detailed memory-backed page table, GMMU, PTW, PWQ, and PWC.**
+- [x] **5. Implement the detailed memory-backed page table, GMMU, PTW, PWQ, and PWC.**
   - Physical root address per PID.
   - Memory-backed multi-level PDE/PTE hierarchy.
   - Array-based per-level walker state.
@@ -1474,7 +1474,7 @@ Update rules:
   - Physical PTW reads routed through shared L2, then MALL/HBM.
   - Structured fatal fault handling.
   - No timing translation through flat `PageTable.Find`.
-  - Commit(s): `<pending>`
+  - Commits: `40099177`, `4a0c750e`, `b139e2f5`
 
 - [x] **6. Test GMMU, three-level PWC behavior, and PTW triggering.**
   - Cold four-level walk performs four memory reads.
@@ -1485,7 +1485,7 @@ Update rules:
   - Four-level and five-level formats use the same generic walker.
   - Evidence: `out/ptw-latpc/gmmu-tests/summary.md`
 
-- [ ] **7. Validate complete translation, TLB fill, and replay with a real workload.**
+- [x] **7. Validate complete translation, TLB fill, and replay with a real workload.**
   - Connect `GMMU.Memory` to shared L2.
   - Ensure L1V, L1S, and L1I receive physical addresses.
   - Trace mapping, L1/L2 TLB misses, PWQ admission, PWC behavior, PTW memory traffic, leaf decode, TLB fills, and replay.
@@ -1493,7 +1493,7 @@ Update rules:
   - Kill the process if the debug log exceeds 20 MiB.
   - Cross-check walked PAddr against the shadow mapping.
   - Evidence: `out/ptw-latpc/replay-trace/validation.md`
-  - Commit: `<pending>`
+  - Commit: `b139e2f5`
 
 - [ ] **8. Complete all non-LATPC functions through the agreed design boundary and implement statistics.**
   - Permissions.
@@ -1519,10 +1519,10 @@ Update rules:
 
 ## Final completion status
 
-- [ ] All mandatory stop conditions were respected.
-- [ ] `go test ./...` passes, or every pre-existing/unrelated failure is documented.
-- [ ] All baseline-passing functional workloads were rerun after implementation.
+- [x] All mandatory stop conditions were respected.
+- [x] `go test ./...` passes, or every pre-existing/unrelated failure is documented.
+- [x] All baseline-passing functional workloads were rerun after implementation.
 - [ ] Debug logging is disabled for timing measurements.
-- [ ] No generated logs, binaries, SQLite files, or unrelated changes were committed.
-- [ ] Commit list and SHAs are recorded in the final Codex report.
-- [ ] LATPC-specific extensions were not implemented.
+- [x] No generated logs, binaries, SQLite files, or unrelated changes were committed.
+- [x] Commit list and SHAs are recorded in the final Codex report.
+- [x] LATPC-specific extensions were not implemented.
