@@ -3,7 +3,7 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -64,7 +64,7 @@ type memcopyH2DInput struct {
 }
 
 func handleMemcopyH2D(w http.ResponseWriter, r *http.Request) {
-	dataStr, err := ioutil.ReadAll(r.Body)
+	dataStr, err := io.ReadAll(r.Body)
 	if err != nil {
 		panic(err)
 	}

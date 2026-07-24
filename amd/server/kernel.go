@@ -5,7 +5,7 @@ import (
 	"debug/elf"
 	"encoding/base64"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 
 	"github.com/sarchlab/mgpusim/v5/amd/insts"
@@ -26,7 +26,7 @@ type launchKernelInput struct {
 }
 
 func handleLaunchKernel(w http.ResponseWriter, r *http.Request) {
-	dataStr, err := ioutil.ReadAll(r.Body)
+	dataStr, err := io.ReadAll(r.Body)
 	if err != nil {
 		panic(err)
 	}
