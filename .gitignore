@@ -65,13 +65,9 @@ _sim_benchmarks/
 stencil2d_bench
 _akita_local/
 out/ptw-latpc/
-out/latpc/evaluation/bin/
-out/latpc/evaluation/runs/
-
-# Reproducible LATPC evaluation products required by docs/LATPC_EXT_PLAN.md.
-!out/latpc/evaluation/results.csv
-!out/latpc/evaluation/resolved_inputs.json
-!out/latpc/evaluation/figures/*.png
+out/latpc/baseline/
+out/latpc/evaluation/
+out/latpc/opportunity/
 
 # hipcc linker intermediate
 *.resolution.txt

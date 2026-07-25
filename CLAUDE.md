@@ -24,6 +24,11 @@ cd amd/tests/acceptance && go build && ./acceptance -num-gpu=1
 cd amd/samples/fir && go build && ./fir -timing --report-all -length=64 -verify
 ```
 
+Remember to wait for enough time using `wait $time`, NEVER FREQUENTLY POLLING!
+`$time` should at least 20min (`1200`) if you don't know the simulation execution
+time. You may decrease this value to real host running time times 1.2 if you know
+abount the rough time. Remember timing mode and functional mode have different host time.
+
 ## Architecture Overview
 
 MGPUSim is a cycle-accurate GPU simulator modeling AMD GCN3 instruction set architecture. It uses the Akita discrete-event simulation framework (`github.com/sarchlab/akita/v4`).
