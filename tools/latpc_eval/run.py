@@ -36,9 +36,12 @@ RUN_STATE_CHECKPOINT_SECONDS = 30.0
 GPU_CLOCK_HZ = 2_100_000_000
 PROFILES = ("large-resource", "paper")
 MODES = ("baseline", "latc", "latp", "latpc", "ideal")
-# FDTD2D has one already-running baseline. Keep that process untouched while
-# temporarily removing the workload from new scheduling and result selection.
-TEMPORARILY_EXCLUDED_WORKLOADS = frozenset({"fdtd2d"})
+# Keep FDTD2D untouched and limit the current evaluation matrix to the five
+# workloads requested by the user. Excluded workloads remain in resolved input
+# and figure metadata so every figure renders them as empty entries.
+TEMPORARILY_EXCLUDED_WORKLOADS = frozenset(
+    {"fdtd2d", "lud", "pagerank", "spmv"}
+)
 
 
 @dataclass(frozen=True)
@@ -730,8 +733,8 @@ def resolve_inputs(
                 "selected_for_matrix": False,
                 "temporarily_excluded": True,
                 "resolution_reason": (
-                    "Temporarily excluded by user request; an already-running "
-                    "FDTD2D process was left untouched"
+                    "Temporarily excluded from the current five-workload "
+                    "evaluation matrix by user request"
                 ),
             }
             continue
@@ -808,7 +811,12 @@ def resolve_inputs(
     write_baseline_summary(resolved)
 
 
-def run_matrix(selected: set[str] | None, force: bool, jobs: int) -> None:
+def run_matrix(
+    selected: set[str] | None,
+    force: bool,
+    jobs: int,
+    modes: tuple[str, ...],
+) -> None:
     resolved = load_resolved()
     if not BIN.exists():
         build_binaries(selected)
@@ -825,7 +833,7 @@ def run_matrix(selected: set[str] | None, force: bool, jobs: int) -> None:
             continue
         tier = resolution["input_tier"]
         for profile in PROFILES:
-            for mode in MODES:
+            for mode in modes:
                 tasks.append((workload, tier, profile, mode))
     with ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = [
@@ -1131,7 +1139,13 @@ def main() -> None:
     parser.add_argument("--pid", type=int)
     parser.add_argument("--tier", choices=("Large", "Small"), default="Large")
     parser.add_argument("--profile", choices=PROFILES, default="large-resource")
-    parser.add_argument("--mode", choices=MODES, default="baseline")
+    parser.add_argument(
+        "--mode",
+        choices=MODES,
+        action="append",
+        default=[],
+        help="run only these modes when used with matrix; repeat as needed",
+    )
     args = parser.parse_args()
     if args.jobs <= 0:
         raise SystemExit("--jobs must be positive")
@@ -1146,7 +1160,7 @@ def main() -> None:
             args.pid,
             args.tier,
             args.profile,
-            args.mode,
+            args.mode[0] if args.mode else "baseline",
         )
         return
     if args.command in ("build", "all"):
@@ -1154,7 +1168,7 @@ def main() -> None:
     if args.command in ("resolve", "all"):
         resolve_inputs(selected, args.force, args.input_tier, args.jobs)
     if args.command in ("matrix", "all"):
-        run_matrix(selected, args.force, args.jobs)
+        run_matrix(selected, args.force, args.jobs, tuple(args.mode or MODES))
     if args.command in ("collect", "all"):
         collect_results()
 
