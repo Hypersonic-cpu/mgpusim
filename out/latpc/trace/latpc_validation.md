@@ -31,3 +31,22 @@ Source commit: `1aa8dd4d6758` plus the uncommitted Phase 6 integration audit
 
 An irregular BFS timing run (`-node 64 -degree 3 -depth 8`) also passed in
 full `latpc/paper` mode.
+
+## Post-integration smoke recheck
+
+Source commit: `54ec822b65d2`
+
+After starting the official Large-input evaluation, the current source was
+rebuilt independently and rechecked in timing mode without stopping or
+signalling that evaluation:
+
+| Workload | Input | Modes | Verification | Page | Mechanism evidence |
+|---|---|---|---|---:|---|
+| ATAX | `-x=16 -y=16` | baseline, latc, latp, latpc, ideal | all pass | 4096 B | detailed modes start 8 walks; ideal starts 0 |
+| MVT | `-size=256` | baseline, latc, latp, latpc, ideal | all pass | 4096 B | LATC compression 8.471x; LATP saves 22 walks; LATPC saves 60 |
+
+For MVT, baseline starts 72 walks, LATP starts 50, full LATPC starts 12,
+and ideal starts zero. The full LATPC run forms four groups containing 64
+members. Raw smoke databases are intentionally temporary under
+`/private/tmp/latpc-atax-smoke/`; the reproducible official matrix remains
+under `out/latpc/evaluation/`.
