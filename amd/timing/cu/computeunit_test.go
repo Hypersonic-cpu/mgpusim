@@ -371,8 +371,7 @@ var _ = Describe("ComputeUnit", func() {
 			toVectorMem.incoming = append(toVectorMem.incoming, dataReady)
 		})
 
-		It("should handle vector data load return, and the return is not "+
-			"the last one for an instruction", func() {
+		It("should handle the only vector data load return", func() {
 			cu.processInputFromVectorMem()
 
 			for i := 0; i < 4; i++ {
@@ -386,9 +385,41 @@ var _ = Describe("ComputeUnit", func() {
 				Expect(insts.BytesToUint32(access.Data)).To(Equal(uint32(i)))
 			}
 
+			Expect(wf.OutstandingVectorMemAccess).To(Equal(0))
+			Expect(wf.OutstandingScalarMemAccess).To(Equal(0))
+			Expect(cu.InFlightVectorMemAccess).To(HaveLen(0))
+		})
+
+		It("should wait for earlier coalesced load responses", func() {
+			lastIssuedRead := &memprotocol.ReadReq{
+				MsgMeta: messaging.MsgMeta{ID: timing.GetIDGenerator().Generate()},
+				Address: 0x140,
+			}
+			lastIssuedInfo := info
+			lastIssuedInfo.Read = lastIssuedRead
+			cu.InFlightVectorMemAccess = append(
+				cu.InFlightVectorMemAccess, lastIssuedInfo)
+
+			toVectorMem.incoming = nil
+			toVectorMem.incoming = append(toVectorMem.incoming,
+				memprotocol.DataReadyRsp{MsgMeta: messaging.MsgMeta{
+					ID: timing.GetIDGenerator().Generate(), RspTo: lastIssuedRead.ID,
+				}, Data: make([]byte, 16)})
+			cu.processInputFromVectorMem()
+
 			Expect(wf.OutstandingVectorMemAccess).To(Equal(1))
 			Expect(wf.OutstandingScalarMemAccess).To(Equal(1))
-			Expect(cu.InFlightVectorMemAccess).To(HaveLen(0))
+			Expect(cu.InFlightVectorMemAccess).To(HaveLen(1))
+
+			toVectorMem.incoming = append(toVectorMem.incoming,
+				memprotocol.DataReadyRsp{MsgMeta: messaging.MsgMeta{
+					ID: timing.GetIDGenerator().Generate(), RspTo: read.ID,
+				}, Data: make([]byte, 16)})
+			cu.processInputFromVectorMem()
+
+			Expect(wf.OutstandingVectorMemAccess).To(Equal(0))
+			Expect(wf.OutstandingScalarMemAccess).To(Equal(0))
+			Expect(cu.InFlightVectorMemAccess).To(BeEmpty())
 		})
 
 		It("should handle vector data load return, and the return is the "+
@@ -456,11 +487,12 @@ var _ = Describe("ComputeUnit", func() {
 			toVectorMem.incoming = append(toVectorMem.incoming, doneRsp)
 		})
 
-		It("should handle vector data store return and the return is not "+
-			"the last one from an instruction", func() {
+		It("should handle the only vector data store return", func() {
 			madeProgress := cu.processInputFromVectorMem()
 
 			Expect(cu.InFlightVectorMemAccess).To(HaveLen(0))
+			Expect(wf.OutstandingVectorMemAccess).To(Equal(0))
+			Expect(wf.OutstandingScalarMemAccess).To(Equal(0))
 			Expect(madeProgress).To(BeTrue())
 		})
 

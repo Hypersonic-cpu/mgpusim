@@ -786,7 +786,10 @@ func (cu *ComputeUnit) handleVectorDataLoadReturn(
 		cu.VRegFile[wf.SIMDID].Write(access)
 	}
 
-	if !info.Read.CanWaitForCoalesce {
+	// The response for the last-issued coalesced transaction can arrive before
+	// its siblings. Do not release a waitcnt until every transaction belonging
+	// to this instruction has returned.
+	if !cu.hasInFlightVectorMemFor(info.Inst) {
 		wf.OutstandingVectorMemAccess--
 		if info.Inst.FormatType == insts.FLAT {
 			wf.OutstandingScalarMemAccess--
@@ -824,7 +827,8 @@ func (cu *ComputeUnit) handleVectorDataStoreRsp(
 	tracing.TraceReqFinalize(cu.comp, *info.Write)
 
 	wf := info.Wavefront
-	if !info.Write.CanWaitForCoalesce {
+	// Stores have the same out-of-order completion property as loads.
+	if !cu.hasInFlightVectorMemFor(info.Inst) {
 		wf.OutstandingVectorMemAccess--
 		if info.Inst.FormatType == insts.FLAT {
 			wf.OutstandingScalarMemAccess--
