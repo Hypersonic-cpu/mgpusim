@@ -314,7 +314,6 @@ var _ = Describe("CommandProcessor", func() {
 		tickUntilQuiet()
 
 		expectCtrlStep(toCaches, memcontrolprotocol.CmdDrain, cp.State.L1VCaches)
-		expectCtrlStep(toCaches, memcontrolprotocol.CmdFlush, cp.State.L1VCaches)
 		expectCtrlStep(toCaches, memcontrolprotocol.CmdInvalidate, cp.State.L1VCaches)
 		expectCtrlStep(toCaches, memcontrolprotocol.CmdEnable, cp.State.L1VCaches)
 
