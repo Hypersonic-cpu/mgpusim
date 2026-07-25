@@ -75,7 +75,7 @@ run_stage resolve_baseline 900 3600 \
     --force --input-tier Small --jobs "$latpc_baseline_jobs"
 run_stage baseline_paper 900 3600 \
     env GOMEMLIMIT=10GiB python3 tools/latpc_eval/run.py matrix \
-    --force --mode baseline --jobs "$latpc_baseline_jobs"
+    --force --profile paper --mode baseline --jobs "$latpc_baseline_jobs"
 check_baselines
 run_stage mechanisms 900 3600 \
     env GOMEMLIMIT=10GiB python3 tools/latpc_eval/run.py matrix \

@@ -398,23 +398,29 @@ def run_one(
                 raise RuntimeError(
                     f"{running_path}: PID {pid} does not run {expected}"
                 )
+            print(
+                f"reattach {workload.name} {profile} {mode} {tier}: pid={pid}",
+                flush=True,
+            )
+            return monitor_run(
+                workload=workload,
+                tier=tier,
+                profile=profile,
+                mode=mode,
+                directory=directory,
+                command=list(running["command"]),
+                built_from=built_from,
+                pid=pid,
+                started_unix=float(running["started_unix"]),
+                initial_max_rss=int(running.get("max_rss_bytes", 0)),
+                proc=None,
+            )
         print(
-            f"reattach {workload.name} {profile} {mode} {tier}: pid={pid}",
+            f"discard stale run state for {workload.name} {profile} {mode}: "
+            f"pid={pid}",
             flush=True,
         )
-        return monitor_run(
-            workload=workload,
-            tier=tier,
-            profile=profile,
-            mode=mode,
-            directory=directory,
-            command=list(running["command"]),
-            built_from=built_from,
-            pid=pid,
-            started_unix=float(running["started_unix"]),
-            initial_max_rss=int(running.get("max_rss_bytes", 0)),
-            proc=None,
-        )
+        running_path.unlink()
 
     if not force and status_path.exists():
         status = json.loads(status_path.read_text())
@@ -816,6 +822,7 @@ def run_matrix(
     force: bool,
     jobs: int,
     modes: tuple[str, ...],
+    profiles: tuple[str, ...],
 ) -> None:
     resolved = load_resolved()
     if not BIN.exists():
@@ -832,7 +839,7 @@ def run_matrix(
             print(f"skip {workload.name}: baseline did not pass", flush=True)
             continue
         tier = resolution["input_tier"]
-        for profile in PROFILES:
+        for profile in profiles:
             for mode in modes:
                 tasks.append((workload, tier, profile, mode))
     with ThreadPoolExecutor(max_workers=jobs) as executor:
@@ -1138,7 +1145,13 @@ def main() -> None:
     )
     parser.add_argument("--pid", type=int)
     parser.add_argument("--tier", choices=("Large", "Small"), default="Large")
-    parser.add_argument("--profile", choices=PROFILES, default="large-resource")
+    parser.add_argument(
+        "--profile",
+        choices=PROFILES,
+        action="append",
+        default=[],
+        help="run only these profiles when used with matrix; repeat as needed",
+    )
     parser.add_argument(
         "--mode",
         choices=MODES,
@@ -1159,7 +1172,7 @@ def main() -> None:
             WORKLOAD_BY_NAME[next(iter(selected))],
             args.pid,
             args.tier,
-            args.profile,
+            args.profile[0] if args.profile else "large-resource",
             args.mode[0] if args.mode else "baseline",
         )
         return
@@ -1168,7 +1181,13 @@ def main() -> None:
     if args.command in ("resolve", "all"):
         resolve_inputs(selected, args.force, args.input_tier, args.jobs)
     if args.command in ("matrix", "all"):
-        run_matrix(selected, args.force, args.jobs, tuple(args.mode or MODES))
+        run_matrix(
+            selected,
+            args.force,
+            args.jobs,
+            tuple(args.mode or MODES),
+            tuple(args.profile or PROFILES),
+        )
     if args.command in ("collect", "all"):
         collect_results()
 
