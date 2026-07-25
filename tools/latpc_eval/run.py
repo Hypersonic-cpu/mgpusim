@@ -102,8 +102,8 @@ WORKLOADS = (
         "./amd/samples/rodinia_lud",
         ("-size=5792",),
         134_189_056,
-        ("-size=1142",),
-        5_216_656,
+        ("-size=256",),
+        262_144,
     ),
     Workload(
         "nw",
