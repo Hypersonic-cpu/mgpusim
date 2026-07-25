@@ -284,6 +284,13 @@ func (d *Driver) MemCopyD2H(ctx *Context, dst interface{}, src Ptr) {
 	d.DrainCommandQueue(queue)
 }
 
+// Flush writes back and invalidates GPU caches before returning.
+func (d *Driver) Flush(ctx *Context) {
+	queue := d.CreateCommandQueue(ctx)
+	d.EnqueueFlush(queue)
+	d.DrainCommandQueue(queue)
+}
+
 // MemCopyD2D copies a memory from a GPU device to another GPU device. num is
 // the total number of bytes.
 func (d *Driver) MemCopyD2D(ctx *Context, dst Ptr, src Ptr, num int) {

@@ -2,6 +2,7 @@ package driver
 
 import (
 	"github.com/sarchlab/akita/v5/messaging"
+	"github.com/sarchlab/akita/v5/timing"
 	"github.com/sarchlab/mgpusim/v5/amd/insts"
 	"github.com/sarchlab/mgpusim/v5/amd/kernels"
 )
@@ -113,6 +114,12 @@ func (c *LaunchKernelCommand) RemoveReq(req messaging.Msg) {
 type FlushCommand struct {
 	ID   uint64
 	Reqs []messaging.Msg
+}
+
+// EnqueueFlush requests a cache flush after all preceding queue commands.
+func (d *Driver) EnqueueFlush(queue *CommandQueue) {
+	cmd := &FlushCommand{ID: timing.GetIDGenerator().Generate()}
+	d.Enqueue(queue, cmd)
 }
 
 // GetID returns the ID of the command

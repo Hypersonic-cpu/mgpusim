@@ -30,9 +30,21 @@ func (m *defaultMemoryCopyMiddleware) ProcessCommand(
 		return m.processMemCopyH2DCommand(cmd, queue)
 	case *MemCopyD2HCommand:
 		return m.processMemCopyD2HCommand(cmd, queue)
+	case *FlushCommand:
+		return m.processFlushCommand(cmd, queue)
 	}
 
 	return false
+}
+
+func (m *defaultMemoryCopyMiddleware) processFlushCommand(
+	cmd *FlushCommand,
+	queue *CommandQueue,
+) bool {
+	m.sendFlushRequest(cmd)
+	queue.IsRunning = true
+
+	return true
 }
 
 func (m *defaultMemoryCopyMiddleware) processMemCopyH2DCommand(
@@ -312,11 +324,17 @@ func (m *defaultMemoryCopyMiddleware) processFlushReturn(
 
 	m.driver.logTaskToGPUClear(req)
 
-	_, cmd, _ := m.driver.findCommandByReqID(req.Meta().ID)
+	_, cmd, cmdQueue := m.driver.findCommandByReqID(req.Meta().ID)
 
 	cmd.RemoveReq(req)
 
-	m.driver.logTaskToGPUClear(req)
+	if flushCmd, ok := cmd.(*FlushCommand); ok && len(flushCmd.Reqs) == 0 {
+		cmdQueue.Context.l2Dirty = false
+		cmdQueue.Context.markAllBuffersClean()
+		cmdQueue.IsRunning = false
+		cmdQueue.Dequeue()
+		m.driver.logCmdComplete(flushCmd)
+	}
 
 	return true
 }

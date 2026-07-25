@@ -230,6 +230,12 @@ func (b *Benchmark) exec() {
 	b.copyOutputDataFromGPU()
 }
 
+func (b *Benchmark) flushDependentKernelWrites() {
+	if b.Arch == arch.CDNA3 {
+		b.driver.Flush(b.context)
+	}
+}
+
 func (b *Benchmark) copyInputDataToGPU() {
 	b.driver.MemCopyH2D(b.context, b.dInputItemSets, b.inputItemSets)
 	b.driver.MemCopyH2D(b.context, b.dReference, b.reference)
@@ -282,6 +288,7 @@ func (b *Benchmark) runKernel1() {
 			}
 			b.driver.LaunchKernel(b.context, b.kernel1, globalSize, localSize, &args)
 		}
+		b.flushDependentKernelWrites()
 	}
 }
 
@@ -328,6 +335,7 @@ func (b *Benchmark) runKernel2() {
 			}
 			b.driver.LaunchKernel(b.context, b.kernel2, globalSize, localSize, &args)
 		}
+		b.flushDependentKernelWrites()
 	}
 }
 
