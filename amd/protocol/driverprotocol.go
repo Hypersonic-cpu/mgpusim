@@ -7,10 +7,9 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/kernels"
 )
 
-// FlushReq requests cache maintenance from the GPU.
+// FlushReq requests the GPU to flush all the cache to the main memory.
 type FlushReq struct {
 	messaging.MsgMeta
-	L1Only bool
 }
 
 // A LaunchKernelReq is a request that asks a GPU to launch a kernel.

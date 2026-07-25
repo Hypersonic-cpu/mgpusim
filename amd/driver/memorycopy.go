@@ -204,7 +204,6 @@ func (m *defaultMemoryCopyMiddleware) sendFlushRequest(
 				Src: m.driver.gpuPort().AsRemote(),
 				Dst: gpu,
 			},
-			L1Only: flushCommandL1Only(cmd),
 		}
 		m.driver.requestsToSend = append(m.driver.requestsToSend, req)
 		cmd.AddReq(req)
@@ -330,19 +329,12 @@ func (m *defaultMemoryCopyMiddleware) processFlushReturn(
 	cmd.RemoveReq(req)
 
 	if flushCmd, ok := cmd.(*FlushCommand); ok && len(flushCmd.Reqs) == 0 {
-		if !flushCmd.L1Only {
-			cmdQueue.Context.l2Dirty = false
-			cmdQueue.Context.markAllBuffersClean()
-		}
+		cmdQueue.Context.l2Dirty = false
+		cmdQueue.Context.markAllBuffersClean()
 		cmdQueue.IsRunning = false
 		cmdQueue.Dequeue()
 		m.driver.logCmdComplete(flushCmd)
 	}
 
 	return true
-}
-
-func flushCommandL1Only(cmd Command) bool {
-	flushCmd, ok := cmd.(*FlushCommand)
-	return ok && flushCmd.L1Only
 }
