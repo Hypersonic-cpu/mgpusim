@@ -23,6 +23,17 @@ DEFAULT_RESOLVED = (
 )
 DEFAULT_OUTPUT = ROOT / "out" / "latpc" / "evaluation" / "figures"
 MODES = ("latc", "latp", "latpc", "ideal")
+WORKLOAD_ORDER = (
+    "atax",
+    "bicg",
+    "fdtd2d",
+    "mvt",
+    "lud",
+    "nw",
+    "bfs",
+    "pagerank",
+    "spmv",
+)
 MODE_LABELS = {"latc": "LATC", "latp": "LATP", "latpc": "LATPC", "ideal": "Ideal"}
 COLORS = {
     "latc": "#4C78A8",
@@ -99,10 +110,18 @@ def plot_speedup(
     rows: list[dict[str, Any]],
     resolved: dict[str, Any],
     output: Path,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     table = passing(rows, "large-resource")
-    workloads = selected_workloads(table)
-    labels = [name.upper() for name in workloads] + ["GMean"]
+    selected = selected_workloads(table)
+    workloads = [
+        name for name in WORKLOAD_ORDER if name in resolved["workloads"]
+    ]
+    labels = [
+        f"{name.upper()}\n(excluded)"
+        if resolved["workloads"][name].get("temporarily_excluded")
+        else name.upper()
+        for name in workloads
+    ] + ["GMean"]
     x = np.arange(len(labels))
     width = 0.18
     fig, ax = plt.subplots(figsize=(max(8.0, len(labels) * 1.1), 4.8))
@@ -110,9 +129,15 @@ def plot_speedup(
         speedups = [
             table[(name, "baseline")]["sim_cycles"]
             / table[(name, mode)]["sim_cycles"]
-            for name in workloads
+            for name in selected
         ]
-        values = speedups + [geometric_mean(speedups)]
+        values = [
+            table[(name, "baseline")]["sim_cycles"]
+            / table[(name, mode)]["sim_cycles"]
+            if name in selected
+            else math.nan
+            for name in workloads
+        ] + [geometric_mean(speedups)]
         bars = ax.bar(
             x + (index - 1.5) * width,
             values,
@@ -122,7 +147,7 @@ def plot_speedup(
         )
         for workload_index, workload in enumerate(workloads):
             tier = resolved["workloads"][workload]["input_tier"]
-            if tier == "Small":
+            if workload in selected and tier == "Small":
                 bars[workload_index].set_hatch("///")
                 bars[workload_index].set_edgecolor("black")
     ax.axhline(1.0, color="black", linewidth=1, linestyle="--")
@@ -133,7 +158,7 @@ def plot_speedup(
     ax.set_title("LATPC application performance — large-resource profile")
     fig.tight_layout()
     save_figure(fig, output, "latpc_speedup_by_workload")
-    return workloads
+    return workloads, selected
 
 
 def safe_rate(numerator: float, denominator: float) -> float:
@@ -146,6 +171,7 @@ def plot_bottlenecks(
     rows: list[dict[str, Any]],
     output: Path,
     workloads: list[str],
+    selected: list[str],
 ) -> None:
     table = passing(rows, "large-resource")
     modes = ("baseline", "latc", "latp", "latpc")
@@ -165,6 +191,8 @@ def plot_bottlenecks(
                 table[(workload, mode)]["pwq_stall_cycles"],
                 table[(workload, mode)]["sim_cycles"],
             )
+            if workload in selected and (workload, mode) in table
+            else math.nan
             for workload in workloads
         ]
         mshr = [
@@ -172,6 +200,8 @@ def plot_bottlenecks(
                 table[(workload, mode)]["l1_mshr_failures"],
                 table[(workload, mode)]["l1_tlb_accesses"],
             )
+            if workload in selected and (workload, mode) in table
+            else math.nan
             for workload in workloads
         ]
         offset = (index - 1.5) * width
@@ -199,6 +229,7 @@ def plot_prefetch_quality(
     rows: list[dict[str, Any]],
     output: Path,
     workloads: list[str],
+    selected: list[str],
 ) -> None:
     table = passing(rows, "large-resource")
     modes = ("latp", "latpc")
@@ -210,10 +241,14 @@ def plot_prefetch_quality(
         offset = (index - 0.5) * width
         coverage = [
             table[(workload, mode)]["prefetch_coverage"]
+            if workload in selected and (workload, mode) in table
+            else math.nan
             for workload in workloads
         ]
         accuracy = [
             table[(workload, mode)]["prefetch_accuracy"]
+            if workload in selected and (workload, mode) in table
+            else math.nan
             for workload in workloads
         ]
         axes[0].bar(
@@ -319,12 +354,12 @@ def main() -> None:
     args = parser.parse_args()
     rows = load_rows(args.csv)
     resolved = json.loads(args.resolved.read_text())
-    workloads = plot_speedup(rows, resolved, args.output)
-    if not workloads:
+    workloads, selected = plot_speedup(rows, resolved, args.output)
+    if not selected:
         raise SystemExit("no complete passing large-resource workload matrix")
-    plot_bottlenecks(rows, args.output, workloads)
-    plot_prefetch_quality(rows, args.output, workloads)
-    write_manifest(rows, resolved, args.output, workloads, args.csv)
+    plot_bottlenecks(rows, args.output, workloads, selected)
+    plot_prefetch_quality(rows, args.output, workloads, selected)
+    write_manifest(rows, resolved, args.output, selected, args.csv)
 
 
 if __name__ == "__main__":

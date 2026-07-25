@@ -36,6 +36,9 @@ RUN_STATE_CHECKPOINT_SECONDS = 30.0
 GPU_CLOCK_HZ = 2_100_000_000
 PROFILES = ("large-resource", "paper")
 MODES = ("baseline", "latc", "latp", "latpc", "ideal")
+# FDTD2D has one already-running baseline. Keep that process untouched while
+# temporarily removing the workload from new scheduling and result selection.
+TEMPORARILY_EXCLUDED_WORKLOADS = frozenset({"fdtd2d"})
 
 
 @dataclass(frozen=True)
@@ -170,6 +173,8 @@ def build_binaries(selected: set[str] | None = None) -> None:
     environment["GOMEMLIMIT"] = GOMEMLIMIT
     environment.setdefault("GOCACHE", "/private/tmp/mgpusim-go-cache")
     for workload in WORKLOADS:
+        if workload.name in TEMPORARILY_EXCLUDED_WORKLOADS:
+            continue
         if selected and workload.name not in selected:
             continue
         command = [
@@ -190,6 +195,8 @@ def build_binaries(selected: set[str] | None = None) -> None:
         manifest = json.loads(manifest_path.read_text())
         manifest["gOMEMLIMIT"] = GOMEMLIMIT
     for workload in WORKLOADS:
+        if workload.name in TEMPORARILY_EXCLUDED_WORKLOADS:
+            continue
         if selected and workload.name not in selected:
             continue
         manifest["binaries"][workload.name] = {
@@ -709,6 +716,23 @@ def resolve_inputs(
         if selected and workload.name not in selected:
             continue
         existing = resolved["workloads"].get(workload.name)
+        if workload.name in TEMPORARILY_EXCLUDED_WORKLOADS:
+            resolved["workloads"][workload.name] = {
+                "input_tier": "Small",
+                "input": workload.input_text("Small"),
+                "estimated_device_bytes": workload.estimated_bytes("Small"),
+                "status": "EXCLUDED",
+                "verify": False,
+                "host_wall_seconds": 0,
+                "max_rss_bytes": 0,
+                "selected_for_matrix": False,
+                "temporarily_excluded": True,
+                "resolution_reason": (
+                    "Temporarily excluded by user request; an already-running "
+                    "FDTD2D process was left untouched"
+                ),
+            }
+            continue
         if (
             existing
             and not force
@@ -796,6 +820,9 @@ def run_matrix(selected: set[str] | None, force: bool, jobs: int) -> None:
         if selected and workload.name not in selected:
             continue
         resolution = resolved["workloads"].get(workload.name)
+        if workload.name in TEMPORARILY_EXCLUDED_WORKLOADS:
+            print(f"skip {workload.name}: temporarily excluded", flush=True)
+            continue
         if not resolution or not resolution.get("selected_for_matrix"):
             print(f"skip {workload.name}: baseline did not pass", flush=True)
             continue
