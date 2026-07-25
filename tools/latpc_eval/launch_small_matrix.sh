@@ -79,7 +79,7 @@ run_stage baseline_paper 900 3600 \
 check_baselines
 run_stage mechanisms 900 3600 \
     env GOMEMLIMIT=10GiB python3 tools/latpc_eval/run.py matrix \
-    --force --mode latc --mode latp --mode latpc \
+    --force --mode latc --mode latp --mode latpc --mode ideal \
     --jobs "$latpc_mechanism_jobs"
 env GOMEMLIMIT=10GiB python3 tools/latpc_eval/run.py collect
 env GOMEMLIMIT=10GiB python3 tools/latpc_plot/plot.py
