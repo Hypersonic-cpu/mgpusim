@@ -786,14 +786,12 @@ func (cu *ComputeUnit) handleVectorDataLoadReturn(
 		cu.VRegFile[wf.SIMDID].Write(access)
 	}
 
-	// The response for the last-issued coalesced transaction can arrive before
-	// its siblings. Do not release a waitcnt until every transaction belonging
-	// to this instruction has returned.
+	// A coalesced instruction completes only once all of its siblings return.
+	// Retire its VMCNT slot in issue order, because a later instruction can
+	// respond before an earlier one.
 	if !cu.hasInFlightVectorMemFor(info.Inst) {
-		wf.OutstandingVectorMemAccess--
-		if info.Inst.FormatType == insts.FLAT {
-			wf.OutstandingScalarMemAccess--
-		}
+		info.Inst.VectorMemDataReady = true
+		cu.retireReadyVectorMemInstructions(wf)
 	}
 
 	// Coalesced responses can return out of order, so CanWaitForCoalesce (the
@@ -829,10 +827,8 @@ func (cu *ComputeUnit) handleVectorDataStoreRsp(
 	wf := info.Wavefront
 	// Stores have the same out-of-order completion property as loads.
 	if !cu.hasInFlightVectorMemFor(info.Inst) {
-		wf.OutstandingVectorMemAccess--
-		if info.Inst.FormatType == insts.FLAT {
-			wf.OutstandingScalarMemAccess--
-		}
+		info.Inst.VectorMemDataReady = true
+		cu.retireReadyVectorMemInstructions(wf)
 	}
 
 	// Coalesced responses can return out of order; end the inst task and mark
@@ -841,6 +837,26 @@ func (cu *ComputeUnit) handleVectorDataStoreRsp(
 	if !cu.hasInFlightVectorMemFor(info.Inst) {
 		cu.markInstDataReturned(info.Inst, "vmem")
 		cu.logInstTask(wf, info.Inst, true)
+	}
+}
+
+// retireReadyVectorMemInstructions retires vector-memory instructions in
+// issue order. s_waitcnt vmcnt(N) is ordered: completion of a younger load
+// cannot make an older load's destination available.
+func (cu *ComputeUnit) retireReadyVectorMemInstructions(
+	wf *wavefront.Wavefront,
+) {
+	for len(wf.PendingVectorMemInsts) > 0 {
+		inst := wf.PendingVectorMemInsts[0]
+		if !inst.VectorMemDataReady {
+			return
+		}
+
+		wf.PendingVectorMemInsts = wf.PendingVectorMemInsts[1:]
+		wf.OutstandingVectorMemAccess--
+		if inst.FormatType == insts.FLAT {
+			wf.OutstandingScalarMemAccess--
+		}
 	}
 }
 

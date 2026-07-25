@@ -267,6 +267,8 @@ func (u *VectorMemoryUnit) executeFlatLoad(
 	})
 	u.startIssueSubtask(wave.DynamicInst())
 
+	wave.PendingVectorMemInsts = append(
+		wave.PendingVectorMemInsts, wave.DynamicInst())
 	wave.OutstandingVectorMemAccess++
 	wave.OutstandingScalarMemAccess++
 
@@ -318,6 +320,8 @@ func (u *VectorMemoryUnit) executeFlatStore(
 	})
 	u.startIssueSubtask(wave.DynamicInst())
 
+	wave.PendingVectorMemInsts = append(
+		wave.PendingVectorMemInsts, wave.DynamicInst())
 	wave.OutstandingVectorMemAccess++
 	wave.OutstandingScalarMemAccess++
 

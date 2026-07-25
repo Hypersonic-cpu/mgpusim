@@ -11,6 +11,11 @@ type Inst struct {
 	*insts.Inst
 
 	ID uint64
+
+	// VectorMemDataReady is set once every coalesced vector-memory
+	// transaction for this dynamic instruction has returned. The CU retires
+	// ready instructions in issue order to implement s_waitcnt semantics.
+	VectorMemDataReady bool
 }
 
 // NewInst creates a newly created Inst

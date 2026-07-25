@@ -64,6 +64,7 @@ type Wavefront struct {
 
 	OutstandingScalarMemAccess int
 	OutstandingVectorMemAccess int
+	PendingVectorMemInsts      []*Inst
 
 	// InFlightInsts counts this wavefront's instruction tasks currently in
 	// flight (issued but not yet completed). When it is zero the wavefront has

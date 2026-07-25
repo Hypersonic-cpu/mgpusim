@@ -348,6 +348,7 @@ var _ = Describe("ComputeUnit", func() {
 			info.Read = read
 			info.Wavefront = wf
 			info.Inst = inst
+			wf.PendingVectorMemInsts = []*wavefront.Inst{inst}
 			info.laneInfo = []vectorMemAccessLaneInfo{
 				{0, insts.VReg(0), 1, 0},
 				{1, insts.VReg(0), 1, 4},
@@ -390,7 +391,7 @@ var _ = Describe("ComputeUnit", func() {
 			Expect(cu.InFlightVectorMemAccess).To(HaveLen(0))
 		})
 
-		It("should wait for earlier coalesced load responses", func() {
+		It("should wait for all coalesced load responses", func() {
 			lastIssuedRead := &memprotocol.ReadReq{
 				MsgMeta: messaging.MsgMeta{ID: timing.GetIDGenerator().Generate()},
 				Address: 0x140,
@@ -420,6 +421,42 @@ var _ = Describe("ComputeUnit", func() {
 			Expect(wf.OutstandingVectorMemAccess).To(Equal(0))
 			Expect(wf.OutstandingScalarMemAccess).To(Equal(0))
 			Expect(cu.InFlightVectorMemAccess).To(BeEmpty())
+		})
+
+		It("should retire vector loads in issue order", func() {
+			laterInst := wavefront.NewInst(insts.NewInst())
+			laterInst.FormatType = insts.FLAT
+			laterRead := &memprotocol.ReadReq{
+				MsgMeta: messaging.MsgMeta{ID: timing.GetIDGenerator().Generate()},
+				Address: 0x140,
+			}
+			laterInfo := info
+			laterInfo.Inst = laterInst
+			laterInfo.Read = laterRead
+			wf.PendingVectorMemInsts = []*wavefront.Inst{inst, laterInst}
+			wf.OutstandingVectorMemAccess = 2
+			wf.OutstandingScalarMemAccess = 2
+			cu.InFlightVectorMemAccess = append(
+				cu.InFlightVectorMemAccess, laterInfo)
+
+			toVectorMem.incoming = nil
+			toVectorMem.incoming = append(toVectorMem.incoming,
+				memprotocol.DataReadyRsp{MsgMeta: messaging.MsgMeta{
+					ID: timing.GetIDGenerator().Generate(), RspTo: laterRead.ID,
+				}, Data: make([]byte, 16)})
+			cu.processInputFromVectorMem()
+
+			Expect(wf.OutstandingVectorMemAccess).To(Equal(2))
+			Expect(wf.OutstandingScalarMemAccess).To(Equal(2))
+
+			toVectorMem.incoming = append(toVectorMem.incoming,
+				memprotocol.DataReadyRsp{MsgMeta: messaging.MsgMeta{
+					ID: timing.GetIDGenerator().Generate(), RspTo: read.ID,
+				}, Data: make([]byte, 16)})
+			cu.processInputFromVectorMem()
+
+			Expect(wf.OutstandingVectorMemAccess).To(Equal(0))
+			Expect(wf.OutstandingScalarMemAccess).To(Equal(0))
 		})
 
 		It("should handle vector data load return, and the return is the "+
@@ -475,6 +512,7 @@ var _ = Describe("ComputeUnit", func() {
 			info.Wavefront = wf
 			info.Inst = inst
 			info.Write = writeReq
+			wf.PendingVectorMemInsts = []*wavefront.Inst{inst}
 			cu.InFlightVectorMemAccess = append(
 				cu.InFlightVectorMemAccess, info)
 
