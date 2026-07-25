@@ -471,9 +471,19 @@ func (m *ctrlMiddleware) execFlushStep(step int) int {
 		return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
 			m.l1Caches(), memcontrolprotocol.CmdInvalidate, nil, 0)
 	case 3:
+		if state.CurrFlushReq.L1Only {
+			return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
+				m.l1Caches(), memcontrolprotocol.CmdEnable, nil, 0)
+		}
 		return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
 			state.L2Caches, memcontrolprotocol.CmdDrain, nil, 0)
 	case 4:
+		if state.CurrFlushReq.L1Only {
+			state.PendingDriverRsps = append(
+				state.PendingDriverRsps, driverRspFlushDone)
+			state.CtrlSeq = ctrlSeqNone
+			return 0
+		}
 		return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
 			state.L2Caches, memcontrolprotocol.CmdFlush, nil, 0)
 	case 5:

@@ -232,7 +232,7 @@ func (b *Benchmark) exec() {
 
 func (b *Benchmark) flushDependentKernelWrites() {
 	if b.Arch == arch.CDNA3 {
-		b.driver.Flush(b.context)
+		b.driver.FlushL1(b.context)
 	}
 }
 

@@ -112,13 +112,24 @@ func (c *LaunchKernelCommand) RemoveReq(req messaging.Msg) {
 
 // A FlushCommand is a command triggers the GPU cache to flush
 type FlushCommand struct {
-	ID   uint64
-	Reqs []messaging.Msg
+	ID     uint64
+	L1Only bool
+	Reqs   []messaging.Msg
 }
 
 // EnqueueFlush requests a cache flush after all preceding queue commands.
 func (d *Driver) EnqueueFlush(queue *CommandQueue) {
 	cmd := &FlushCommand{ID: timing.GetIDGenerator().Generate()}
+	d.Enqueue(queue, cmd)
+}
+
+// EnqueueL1Flush writes back and invalidates the L1 caches while preserving
+// the shared L2 contents for a subsequent dependent kernel launch.
+func (d *Driver) EnqueueL1Flush(queue *CommandQueue) {
+	cmd := &FlushCommand{
+		ID:     timing.GetIDGenerator().Generate(),
+		L1Only: true,
+	}
 	d.Enqueue(queue, cmd)
 }
 
