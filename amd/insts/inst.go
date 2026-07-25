@@ -49,6 +49,10 @@ type Inst struct {
 	Offset *Operand
 	SImm16 *Operand
 	SAddr  *Operand // FLAT scalar address (0x7F = OFF for global addressing)
+	// UsesSAddr records the architecture-resolved FLAT/GLOBAL address form.
+	// It is set by the disassembler, because SAddr=0 is scalar-address mode on
+	// CDNA3 but OFF mode on GCN3.
+	UsesSAddr bool
 
 	Abs                 int
 	Omod                int
@@ -89,4 +93,3 @@ func NewInst() *Inst {
 	i.InstType = new(InstType)
 	return i
 }
-

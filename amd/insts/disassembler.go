@@ -415,12 +415,14 @@ func (d *Disassembler) decodeFLAT(inst *Inst, buf []byte) error {
 	//   for s[0:1]) is a valid scalar base register.
 	// - GCN3: SAddr=0x7F or SAddr=0 means OFF mode (VGPR pair as 64-bit address).
 	if d.IsCDNA3 {
+		inst.UsesSAddr = saddrBits != 0x7F
 		if saddrBits != 0x7F {
 			inst.Addr = NewVRegOperand(bits, bits, 1)
 		} else {
 			inst.Addr = NewVRegOperand(bits, bits, 2)
 		}
 	} else {
+		inst.UsesSAddr = saddrBits != 0x7F && saddrBits != 0
 		if saddrBits != 0x7F && saddrBits != 0 {
 			inst.Addr = NewVRegOperand(bits, bits, 1)
 		} else {

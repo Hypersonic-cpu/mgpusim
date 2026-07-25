@@ -262,15 +262,10 @@ func (c defaultCoalescer) readFlatAddr(
 ) uint64 {
 	inst := wf.Inst()
 
-	// Handle SAddr mode.
-	// Use inst.Addr.RegCount to determine the addressing mode. The disassembler
-	// already resolves the architecture-dependent SADDR/OFF rule at decode time
-	// (see amd/insts/disassembler.go decodeFLAT, keyed on IsCDNA3), so:
-	//   RegCount=1 -> SAddr mode (scalar base + 32-bit VGPR offset)
-	//   RegCount=2 -> OFF mode   (64-bit VGPR pair as the full address)
-	// This requires the timing CU to decode with the correct arch; the MI300X
-	// timing config wires a CDNA3 disassembler via WithDecoderBuilder.
-	hasSAddr := inst.Addr.RegCount == 1
+	// UsesSAddr is decoded with architecture-specific CDNA3/GCN3 semantics.
+	// Keep the RegCount fallback for unit tests and manually constructed
+	// instructions that predate the explicit field.
+	hasSAddr := inst.UsesSAddr || inst.Addr.RegCount == 1
 	var scalarBase uint64
 	if hasSAddr && inst.SAddr != nil {
 		sAddrReg := int(inst.SAddr.IntValue)

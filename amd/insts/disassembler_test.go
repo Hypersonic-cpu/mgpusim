@@ -342,6 +342,24 @@ var _ = Describe("CDNA3 Disassembler", func() {
 		Expect(printer.Print(inst)).To(Equal("global_load_dword v6, v[4:5], off"))
 	})
 
+	It("should resolve CDNA3 and GCN3 SADDR=0 differently", func() {
+		// global_load_dword v6, v4, s[0:1]
+		buf := []byte{0x00, 0x80, 0x50, 0xDC, 0x04, 0x00, 0x00, 0x06}
+
+		cdna3 := insts.NewDisassembler()
+		cdna3.IsCDNA3 = true
+		cdna3Inst, err := cdna3.Decode(buf)
+		Expect(err).To(BeNil())
+		Expect(cdna3Inst.UsesSAddr).To(BeTrue())
+		Expect(cdna3Inst.Addr.RegCount).To(Equal(1))
+
+		gcn3 := insts.NewDisassembler()
+		gcn3Inst, err := gcn3.Decode(buf)
+		Expect(err).To(BeNil())
+		Expect(gcn3Inst.UsesSAddr).To(BeFalse())
+		Expect(gcn3Inst.Addr.RegCount).To(Equal(2))
+	})
+
 	It("should decode DC708000 007F0200 as global_store_dword", func() {
 		// global_store_dword v[0:1], v2, off
 		buf := []byte{0x00, 0x80, 0x70, 0xDC, 0x00, 0x02, 0x7F, 0x00}

@@ -117,4 +117,30 @@ var _ = Describe("Default Coalescer", func() {
 
 		Expect(memTransactions).To(HaveLen(4))
 	})
+
+	It("should use the decoded scalar base for CDNA3 SADDR instructions", func() {
+		inst := insts.NewInst()
+		inst.FormatType = insts.FLAT
+		inst.Opcode = 20 // flat_load_dword
+		inst.Dst = insts.NewVRegOperand(0, 0, 1)
+		// Keep RegCount=2 to exercise the field that records architecture-
+		// resolved SADDR semantics rather than relying on a register-count hint.
+		inst.Addr = insts.NewVRegOperand(2, 2, 2)
+		inst.SAddr = insts.NewIntOperand(0, 4)
+		inst.UsesSAddr = true
+		wf.SetDynamicInst(wavefront.NewInst(inst))
+		wf.SetEXEC(1)
+
+		regAccessor.setRegValue(insts.SReg(4), 2, 0, wf.SRegOffset,
+			insts.Uint64ToBytes(0x1_0000)[:8])
+		// The high half is deliberately stale. It must not become a virtual
+		// address in scalar-base mode.
+		regAccessor.setRegValue(insts.VReg(2), 2, 0, wf.VRegOffset,
+			insts.Uint64ToBytes(0xad17_bbc0_0000_3000)[:8])
+
+		memTransactions := c.generateMemTransactions(wf)
+
+		Expect(memTransactions).To(HaveLen(1))
+		Expect(memTransactions[0].Read.Address).To(Equal(uint64(0x1_3000)))
+	})
 })
