@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import math
 import os
@@ -405,7 +406,10 @@ def run_one(
 
     if not force and status_path.exists():
         status = json.loads(status_path.read_text())
-        reusable = status.get("git_commit") == built_from
+        reusable = (
+            status.get("git_commit") == built_from
+            and status.get("input_tier") == tier
+        )
         complete = status.get("status") != "PASS" or metrics_path.exists()
         if reusable and complete:
             print(
@@ -667,12 +671,21 @@ def write_baseline_summary(resolved: dict[str, Any]) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
-def resolve_inputs(selected: set[str] | None, force: bool) -> None:
+def resolve_inputs(
+    selected: set[str] | None,
+    force: bool,
+    input_tier: str,
+    jobs: int,
+) -> None:
     if not BIN.exists():
         build_binaries(selected)
     resolved = {
         "schema_version": 1,
-        "policy": "Large first; Small only on MEMORY_LIMIT_EXCEEDED",
+        "policy": (
+            "Small selected by explicit user request"
+            if input_tier == "Small"
+            else "Large first; Small only on MEMORY_LIMIT_EXCEEDED"
+        ),
         "gOMEMLIMIT": GOMEMLIMIT,
         "rss_watchdog_bytes": RSS_LIMIT_BYTES,
         "rss_sampling_seconds": RSS_INTERVAL_SECONDS,
@@ -684,51 +697,76 @@ def resolve_inputs(selected: set[str] | None, force: bool) -> None:
     }
     if RESOLVED.exists() and not force:
         resolved = load_resolved()
+    resolved["policy"] = (
+        "Small selected by explicit user request"
+        if input_tier == "Small"
+        else "Large first; Small only on MEMORY_LIMIT_EXCEEDED"
+    )
+    resolved["git_commit"] = git_commit()
+
+    to_resolve: list[Workload] = []
     for workload in WORKLOADS:
         if selected and workload.name not in selected:
             continue
         existing = resolved["workloads"].get(workload.name)
-        if existing and not force:
+        if (
+            existing
+            and not force
+            and (input_tier == "auto" or existing["input_tier"] == input_tier)
+        ):
             print(
                 f"resolved {workload.name}: {existing['input_tier']} "
                 f"{existing['status']}",
                 flush=True,
             )
             continue
-        large = run_one(
-            workload,
-            "Large",
-            "large-resource",
-            "baseline",
-            force=force,
-        )
-        chosen = large
-        reason = "Large completed without host memory exhaustion"
-        if large["status"] == "MEMORY_LIMIT_EXCEEDED":
-            oom_directory = RUNS / "resolution-large-oom" / workload.name
-            oom_directory.mkdir(parents=True, exist_ok=True)
-            source_directory = run_directory(
-                "large-resource", "baseline", workload.name
-            )
-            for filename in ("status.json", "stdout.log", "stderr.log"):
-                source = source_directory / filename
-                if source.exists():
-                    source.replace(oom_directory / filename)
-            metrics = metric_database(source_directory)
-            if metrics.exists():
-                metrics.replace(oom_directory / metrics.name)
+        to_resolve.append(workload)
+
+    def resolve_one(workload: Workload) -> tuple[str, dict[str, Any]]:
+        if input_tier == "Small":
             chosen = run_one(
                 workload,
                 "Small",
                 "large-resource",
                 "baseline",
-                force=True,
+                force=force,
             )
-            reason = (
-                "Small selected because Large exceeded the 11.5 GiB RSS watchdog"
+            reason = "Small selected by explicit user request"
+        else:
+            large = run_one(
+                workload,
+                "Large",
+                "large-resource",
+                "baseline",
+                force=force,
             )
-        selected_for_matrix = chosen["status"] == "PASS"
-        resolved["workloads"][workload.name] = {
+            chosen = large
+            reason = "Large completed without host memory exhaustion"
+            if large["status"] == "MEMORY_LIMIT_EXCEEDED":
+                oom_directory = RUNS / "resolution-large-oom" / workload.name
+                oom_directory.mkdir(parents=True, exist_ok=True)
+                source_directory = run_directory(
+                    "large-resource", "baseline", workload.name
+                )
+                for filename in ("status.json", "stdout.log", "stderr.log"):
+                    source = source_directory / filename
+                    if source.exists():
+                        source.replace(oom_directory / filename)
+                metrics = metric_database(source_directory)
+                if metrics.exists():
+                    metrics.replace(oom_directory / metrics.name)
+                chosen = run_one(
+                    workload,
+                    "Small",
+                    "large-resource",
+                    "baseline",
+                    force=True,
+                )
+                reason = (
+                    "Small selected because Large exceeded the 11.5 GiB RSS "
+                    "watchdog"
+                )
+        return workload.name, {
             "input_tier": chosen["input_tier"],
             "input": chosen["input"],
             "estimated_device_bytes": chosen["estimated_device_bytes"],
@@ -736,17 +774,24 @@ def resolve_inputs(selected: set[str] | None, force: bool) -> None:
             "verify": chosen["verify"],
             "host_wall_seconds": chosen["host_wall_seconds"],
             "max_rss_bytes": chosen["max_rss_bytes"],
-            "selected_for_matrix": selected_for_matrix,
+            "selected_for_matrix": chosen["status"] == "PASS",
             "resolution_reason": reason,
         }
-        atomic_json(RESOLVED, resolved)
+
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = [executor.submit(resolve_one, workload) for workload in to_resolve]
+        for future in as_completed(futures):
+            name, resolution = future.result()
+            resolved["workloads"][name] = resolution
+            atomic_json(RESOLVED, resolved)
     write_baseline_summary(resolved)
 
 
-def run_matrix(selected: set[str] | None, force: bool) -> None:
+def run_matrix(selected: set[str] | None, force: bool, jobs: int) -> None:
     resolved = load_resolved()
     if not BIN.exists():
         build_binaries(selected)
+    tasks: list[tuple[Workload, str, str, str]] = []
     for workload in WORKLOADS:
         if selected and workload.name not in selected:
             continue
@@ -757,13 +802,14 @@ def run_matrix(selected: set[str] | None, force: bool) -> None:
         tier = resolution["input_tier"]
         for profile in PROFILES:
             for mode in MODES:
-                run_one(
-                    workload,
-                    tier,
-                    profile,
-                    mode,
-                    force=force,
-                )
+                tasks.append((workload, tier, profile, mode))
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        futures = [
+            executor.submit(run_one, workload, tier, profile, mode, force=force)
+            for workload, tier, profile, mode in tasks
+        ]
+        for future in as_completed(futures):
+            future.result()
 
 
 def read_metrics(path: Path) -> list[tuple[str, str, float, str]]:
@@ -1046,11 +1092,25 @@ def main() -> None:
         help="limit work to one workload; may be repeated",
     )
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--input-tier",
+        choices=("auto", "Small"),
+        default="auto",
+        help="resolve Large-first automatically or force the documented Small input",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="maximum concurrently supervised timing simulations",
+    )
     parser.add_argument("--pid", type=int)
     parser.add_argument("--tier", choices=("Large", "Small"), default="Large")
     parser.add_argument("--profile", choices=PROFILES, default="large-resource")
     parser.add_argument("--mode", choices=MODES, default="baseline")
     args = parser.parse_args()
+    if args.jobs <= 0:
+        raise SystemExit("--jobs must be positive")
     selected = selected_names(args.workload)
     if args.command == "adopt":
         if args.pid is None or selected is None or len(selected) != 1:
@@ -1068,9 +1128,9 @@ def main() -> None:
     if args.command in ("build", "all"):
         build_binaries(selected)
     if args.command in ("resolve", "all"):
-        resolve_inputs(selected, args.force)
+        resolve_inputs(selected, args.force, args.input_tier, args.jobs)
     if args.command in ("matrix", "all"):
-        run_matrix(selected, args.force)
+        run_matrix(selected, args.force, args.jobs)
     if args.command in ("collect", "all"):
         collect_results()
 
