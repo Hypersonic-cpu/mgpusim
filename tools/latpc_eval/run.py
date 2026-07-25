@@ -31,6 +31,7 @@ RESULTS = OUT / "results.csv"
 GOMEMLIMIT = "10GiB"
 RSS_LIMIT_BYTES = int(11.5 * 1024**3)
 RSS_INTERVAL_SECONDS = 0.2
+RUN_STATE_CHECKPOINT_SECONDS = 30.0
 GPU_CLOCK_HZ = 2_100_000_000
 PROFILES = ("large-resource", "paper")
 MODES = ("baseline", "latc", "latp", "latpc", "ideal")
@@ -229,27 +230,76 @@ def process_group_rss_bytes(pgid: int) -> int:
     return total_kib * 1024
 
 
-def stop_process_group(proc: subprocess.Popen[bytes]) -> None:
+def stop_process_group_pid(pid: int) -> None:
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(pid, signal.SIGTERM)
     except ProcessLookupError:
         return
-    try:
-        proc.wait(timeout=5)
+    deadline = time.monotonic() + 5
+    while process_is_alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if not process_is_alive(pid):
         return
-    except subprocess.TimeoutExpired:
-        pass
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
         return
-    proc.wait()
 
 
-def classify_failure(stderr: Path) -> str:
-    if not stderr.exists():
+def process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def process_command(pid: int) -> str:
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def process_elapsed_seconds(pid: int) -> float:
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "etime="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    value = result.stdout.strip()
+    if not value:
+        raise RuntimeError(f"cannot determine elapsed time for PID {pid}")
+    days = 0
+    if "-" in value:
+        day_text, value = value.split("-", 1)
+        days = int(day_text)
+    fields = [int(part) for part in value.split(":")]
+    if len(fields) == 3:
+        hours, minutes, seconds = fields
+    elif len(fields) == 2:
+        hours = 0
+        minutes, seconds = fields
+    else:
+        hours = 0
+        minutes = 0
+        seconds = fields[0]
+    return float((((days * 24) + hours) * 60 + minutes) * 60 + seconds)
+
+
+def classify_failure(stdout: Path, stderr: Path) -> str:
+    text = ""
+    for path in (stdout, stderr):
+        if path.exists():
+            text += path.read_text(errors="replace").lower()
+    if not text:
         return "RUNTIME_FAILURE"
-    text = stderr.read_text(errors="replace").lower()
     memory_markers = (
         "out of memory",
         "cannot allocate memory",
@@ -263,6 +313,34 @@ def classify_failure(stderr: Path) -> str:
     if "panic:" in text:
         return "RUNTIME_FAILURE"
     return "NONZERO_EXIT"
+
+
+def metrics_are_complete(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with sqlite3.connect(path) as database:
+            count = database.execute(
+                "SELECT COUNT(*) FROM mgpusim_metrics"
+            ).fetchone()
+            kernel_time = database.execute(
+                "SELECT COUNT(*) FROM mgpusim_metrics "
+                "WHERE Location = 'Driver' AND What = 'kernel_time'"
+            ).fetchone()
+            page_size = database.execute(
+                "SELECT Value FROM mgpusim_metrics "
+                "WHERE Location = 'GMMU' AND What = 'page_size_bytes'"
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return bool(
+        count
+        and count[0] > 0
+        and kernel_time
+        and kernel_time[0] == 1
+        and page_size
+        and float(page_size[0]) == 4096
+    )
 
 
 def run_directory(profile: str, mode: str, workload: str) -> Path:
@@ -285,11 +363,45 @@ def run_one(
     directory = directory or run_directory(profile, mode, workload.name)
     directory.mkdir(parents=True, exist_ok=True)
     status_path = directory / "status.json"
+    running_path = directory / "running.json"
     metrics_base = directory / "metrics"
     metrics_path = metric_database(directory)
     stdout_path = directory / "stdout.log"
     stderr_path = directory / "stderr.log"
     built_from = binary_commit(workload.name)
+
+    if running_path.exists():
+        running = json.loads(running_path.read_text())
+        expected = str((BIN / workload.name).resolve())
+        pid = int(running["pid"])
+        if running.get("git_commit") != built_from:
+            raise RuntimeError(
+                f"{running_path}: active run uses commit "
+                f"{running.get('git_commit')}, binary uses {built_from}"
+            )
+        if process_is_alive(pid):
+            command_text = process_command(pid)
+            if expected not in command_text:
+                raise RuntimeError(
+                    f"{running_path}: PID {pid} does not run {expected}"
+                )
+        print(
+            f"reattach {workload.name} {profile} {mode} {tier}: pid={pid}",
+            flush=True,
+        )
+        return monitor_run(
+            workload=workload,
+            tier=tier,
+            profile=profile,
+            mode=mode,
+            directory=directory,
+            command=list(running["command"]),
+            built_from=built_from,
+            pid=pid,
+            started_unix=float(running["started_unix"]),
+            initial_max_rss=int(running.get("max_rss_bytes", 0)),
+            proc=None,
+        )
 
     if not force and status_path.exists():
         status = json.loads(status_path.read_text())
@@ -303,7 +415,13 @@ def run_one(
             )
             return status
 
-    for path in (metrics_path, stdout_path, stderr_path, status_path):
+    for path in (
+        metrics_path,
+        stdout_path,
+        stderr_path,
+        status_path,
+        running_path,
+    ):
         if path.exists():
             path.unlink()
 
@@ -322,11 +440,10 @@ def run_one(
     ]
     environment = os.environ.copy()
     environment["GOMEMLIMIT"] = GOMEMLIMIT
-    started = time.monotonic()
-    max_rss = 0
-    killed_for_memory = False
     print("+", " ".join(command), flush=True)
-    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+    stdout = stdout_path.open("wb")
+    stderr = stderr_path.open("wb")
+    try:
         proc = subprocess.Popen(
             command,
             cwd=ROOT,
@@ -335,28 +452,99 @@ def run_one(
             stderr=stderr,
             start_new_session=True,
         )
-        try:
-            while proc.poll() is None:
-                rss = process_group_rss_bytes(proc.pid)
-                max_rss = max(max_rss, rss)
-                if rss > RSS_LIMIT_BYTES:
-                    killed_for_memory = True
-                    stop_process_group(proc)
-                    break
-                time.sleep(RSS_INTERVAL_SECONDS)
-        except BaseException:
-            if proc.poll() is None:
-                stop_process_group(proc)
-            raise
+    finally:
+        stdout.close()
+        stderr.close()
+    started_unix = time.time()
+    atomic_json(
+        running_path,
+        {
+            "pid": proc.pid,
+            "started_unix": started_unix,
+            "max_rss_bytes": 0,
+            "command": command,
+            "git_commit": built_from,
+        },
+    )
+    return monitor_run(
+        workload=workload,
+        tier=tier,
+        profile=profile,
+        mode=mode,
+        directory=directory,
+        command=command,
+        built_from=built_from,
+        pid=proc.pid,
+        started_unix=started_unix,
+        initial_max_rss=0,
+        proc=proc,
+    )
+
+
+def monitor_run(  # noqa: PLR0913
+    *,
+    workload: Workload,
+    tier: str,
+    profile: str,
+    mode: str,
+    directory: Path,
+    command: list[str],
+    built_from: str,
+    pid: int,
+    started_unix: float,
+    initial_max_rss: int,
+    proc: subprocess.Popen[bytes] | None,
+) -> dict[str, Any]:
+    running_path = directory / "running.json"
+    metrics_path = metric_database(directory)
+    stdout_path = directory / "stdout.log"
+    stderr_path = directory / "stderr.log"
+    max_rss = initial_max_rss
+    killed_for_memory = False
+    last_checkpoint = 0.0
+
+    try:
+        while proc.poll() is None if proc is not None else process_is_alive(pid):
+            rss = process_group_rss_bytes(pid)
+            max_rss = max(max_rss, rss)
+            if rss > RSS_LIMIT_BYTES:
+                killed_for_memory = True
+                stop_process_group_pid(pid)
+                break
+            now = time.monotonic()
+            if now-last_checkpoint >= RUN_STATE_CHECKPOINT_SECONDS:
+                atomic_json(
+                    running_path,
+                    {
+                        "pid": pid,
+                        "started_unix": started_unix,
+                        "max_rss_bytes": max_rss,
+                        "command": command,
+                        "git_commit": built_from,
+                    },
+                )
+                last_checkpoint = now
+            time.sleep(RSS_INTERVAL_SECONDS)
+    except BaseException:
+        if process_is_alive(pid):
+            stop_process_group_pid(pid)
+        raise
+
+    return_code: int | None
+    if proc is not None:
         return_code = proc.wait()
-        max_rss = max(max_rss, process_group_rss_bytes(proc.pid))
-    wall = time.monotonic() - started
+    else:
+        return_code = None
+    max_rss = max(max_rss, process_group_rss_bytes(pid))
+    wall = max(0.0, time.time() - started_unix)
     if killed_for_memory:
         outcome = "MEMORY_LIMIT_EXCEEDED"
-    elif return_code == 0 and metrics_path.exists():
+    elif return_code == 0 and metrics_are_complete(metrics_path):
+        outcome = "PASS"
+    elif return_code is None and metrics_are_complete(metrics_path):
         outcome = "PASS"
     else:
-        outcome = classify_failure(stderr_path)
+        outcome = classify_failure(stdout_path, stderr_path)
     status = {
         "workload": workload.name,
         "translation_profile": profile,
@@ -378,13 +566,67 @@ def run_one(
         "stdout": str(stdout_path.relative_to(ROOT)),
         "stderr": str(stderr_path.relative_to(ROOT)),
     }
-    atomic_json(status_path, status)
+    atomic_json(directory / "status.json", status)
+    if running_path.exists():
+        running_path.unlink()
     print(
         f"{workload.name} {profile} {mode} {tier}: {outcome} "
         f"wall={wall:.1f}s rss={max_rss / 1024**3:.2f}GiB",
         flush=True,
     )
     return status
+
+
+def adopt_run(
+    workload: Workload,
+    pid: int,
+    tier: str,
+    profile: str,
+    mode: str,
+) -> dict[str, Any]:
+    directory = run_directory(profile, mode, workload.name)
+    directory.mkdir(parents=True, exist_ok=True)
+    expected = str((BIN / workload.name).resolve())
+    command_text = process_command(pid)
+    if not process_is_alive(pid) or expected not in command_text:
+        raise SystemExit(f"PID {pid} is not an active {workload.name} binary")
+    required = (
+        "-timing",
+        f"-translation-mode={mode}",
+        f"-translation-profile={profile}",
+        *workload.args(tier),
+    )
+    missing = [argument for argument in required if argument not in command_text]
+    if missing:
+        raise SystemExit(
+            f"PID {pid} command does not match requested run; missing {missing}"
+        )
+    built_from = binary_commit(workload.name)
+    started_unix = time.time() - process_elapsed_seconds(pid)
+    command = command_text.split()
+    atomic_json(
+        directory / "running.json",
+        {
+            "pid": pid,
+            "started_unix": started_unix,
+            "max_rss_bytes": process_group_rss_bytes(pid),
+            "command": command,
+            "git_commit": built_from,
+        },
+    )
+    return monitor_run(
+        workload=workload,
+        tier=tier,
+        profile=profile,
+        mode=mode,
+        directory=directory,
+        command=command,
+        built_from=built_from,
+        pid=pid,
+        started_unix=started_unix,
+        initial_max_rss=process_group_rss_bytes(pid),
+        proc=None,
+    )
 
 
 def load_resolved() -> dict[str, Any]:
@@ -795,7 +1037,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "command",
-        choices=("build", "resolve", "matrix", "collect", "all"),
+        choices=("build", "resolve", "matrix", "collect", "all", "adopt"),
     )
     parser.add_argument(
         "--workload",
@@ -804,8 +1046,25 @@ def main() -> None:
         help="limit work to one workload; may be repeated",
     )
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--pid", type=int)
+    parser.add_argument("--tier", choices=("Large", "Small"), default="Large")
+    parser.add_argument("--profile", choices=PROFILES, default="large-resource")
+    parser.add_argument("--mode", choices=MODES, default="baseline")
     args = parser.parse_args()
     selected = selected_names(args.workload)
+    if args.command == "adopt":
+        if args.pid is None or selected is None or len(selected) != 1:
+            raise SystemExit(
+                "adopt requires --pid and exactly one --workload"
+            )
+        adopt_run(
+            WORKLOAD_BY_NAME[next(iter(selected))],
+            args.pid,
+            args.tier,
+            args.profile,
+            args.mode,
+        )
+        return
     if args.command in ("build", "all"):
         build_binaries(selected)
     if args.command in ("resolve", "all"):
