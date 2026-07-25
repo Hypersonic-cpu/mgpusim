@@ -22,7 +22,7 @@ DEFAULT_RESOLVED = (
     ROOT / "out" / "latpc" / "evaluation" / "resolved_inputs.json"
 )
 DEFAULT_OUTPUT = ROOT / "out" / "latpc" / "evaluation" / "figures"
-MODES = ("latc", "latp", "latpc", "ideal")
+MODES = ("latc", "latp", "latpc")
 WORKLOAD_ORDER = (
     "atax",
     "bicg",
@@ -123,7 +123,7 @@ def plot_speedup(
         for name in workloads
     ] + ["GMean"]
     x = np.arange(len(labels))
-    width = 0.18
+    width = 0.22
     fig, ax = plt.subplots(figsize=(max(8.0, len(labels) * 1.1), 4.8))
     for index, mode in enumerate(MODES):
         speedups = [
@@ -139,7 +139,7 @@ def plot_speedup(
             for name in workloads
         ] + [geometric_mean(speedups)]
         bars = ax.bar(
-            x + (index - 1.5) * width,
+            x + (index - (len(MODES) - 1) / 2) * width,
             values,
             width,
             label=MODE_LABELS[mode],
