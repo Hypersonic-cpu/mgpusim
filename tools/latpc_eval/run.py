@@ -733,17 +733,12 @@ def resolve_inputs(
                 ),
             }
             continue
-        if (
-            existing
-            and not force
-            and (input_tier == "auto" or existing["input_tier"] == input_tier)
-        ):
-            print(
-                f"resolved {workload.name}: {existing['input_tier']} "
-                f"{existing['status']}",
-                flush=True,
-            )
-            continue
+        # Do not trust the resolution record as a cache. It deliberately does
+        # not contain the binary provenance, whereas run_one's status record
+        # does. In particular, a repaired binary must re-run a previously
+        # failing baseline rather than merely reusing its old failure.
+        # run_one is inexpensive when its provenance is current, because it
+        # performs that precise reuse check itself.
         to_resolve.append(workload)
 
     def resolve_one(workload: Workload) -> tuple[str, dict[str, Any]]:
