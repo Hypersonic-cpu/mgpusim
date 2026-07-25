@@ -462,18 +462,30 @@ func (m *ctrlMiddleware) execFlushStep(step int) int {
 
 	switch step {
 	case 0:
+		if state.CurrFlushReq.L1Only {
+			return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
+				state.L1VCaches, memcontrolprotocol.CmdDrain, nil, 0)
+		}
 		return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
 			m.l1Caches(), memcontrolprotocol.CmdDrain, nil, 0)
 	case 1:
+		if state.CurrFlushReq.L1Only {
+			return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
+				state.L1VCaches, memcontrolprotocol.CmdFlush, nil, 0)
+		}
 		return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
 			m.l1Caches(), memcontrolprotocol.CmdFlush, nil, 0)
 	case 2:
+		if state.CurrFlushReq.L1Only {
+			return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
+				state.L1VCaches, memcontrolprotocol.CmdInvalidate, nil, 0)
+		}
 		return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
 			m.l1Caches(), memcontrolprotocol.CmdInvalidate, nil, 0)
 	case 3:
 		if state.CurrFlushReq.L1Only {
 			return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
-				m.l1Caches(), memcontrolprotocol.CmdEnable, nil, 0)
+				state.L1VCaches, memcontrolprotocol.CmdEnable, nil, 0)
 		}
 		return m.enqueueCtrlReqs(&state.PendingCacheReqs, m.toCaches(),
 			state.L2Caches, memcontrolprotocol.CmdDrain, nil, 0)

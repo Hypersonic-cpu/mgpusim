@@ -291,7 +291,7 @@ func (d *Driver) Flush(ctx *Context) {
 	d.DrainCommandQueue(queue)
 }
 
-// FlushL1 writes back and invalidates the L1 caches before returning.
+// FlushL1 writes back and invalidates vector L1 caches before returning.
 func (d *Driver) FlushL1(ctx *Context) {
 	queue := d.CreateCommandQueue(ctx)
 	d.EnqueueL1Flush(queue)

@@ -123,7 +123,7 @@ func (d *Driver) EnqueueFlush(queue *CommandQueue) {
 	d.Enqueue(queue, cmd)
 }
 
-// EnqueueL1Flush writes back and invalidates the L1 caches while preserving
+// EnqueueL1Flush writes back and invalidates vector L1 caches while preserving
 // the shared L2 contents for a subsequent dependent kernel launch.
 func (d *Driver) EnqueueL1Flush(queue *CommandQueue) {
 	cmd := &FlushCommand{

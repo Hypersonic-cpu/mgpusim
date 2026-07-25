@@ -300,7 +300,7 @@ var _ = Describe("CommandProcessor", func() {
 		Expect(cp.State.CtrlSeq).To(Equal(ctrlSeqNone))
 	})
 
-	It("should handle an L1-only driver flush request", func() {
+	It("should handle a vector-L1-only driver flush request", func() {
 		req := protocol.FlushReq{
 			MsgMeta: messaging.MsgMeta{
 				ID:  timing.GetIDGenerator().Generate(),
@@ -313,10 +313,10 @@ var _ = Describe("CommandProcessor", func() {
 
 		tickUntilQuiet()
 
-		expectCtrlStep(toCaches, memcontrolprotocol.CmdDrain, l1Dsts())
-		expectCtrlStep(toCaches, memcontrolprotocol.CmdFlush, l1Dsts())
-		expectCtrlStep(toCaches, memcontrolprotocol.CmdInvalidate, l1Dsts())
-		expectCtrlStep(toCaches, memcontrolprotocol.CmdEnable, l1Dsts())
+		expectCtrlStep(toCaches, memcontrolprotocol.CmdDrain, cp.State.L1VCaches)
+		expectCtrlStep(toCaches, memcontrolprotocol.CmdFlush, cp.State.L1VCaches)
+		expectCtrlStep(toCaches, memcontrolprotocol.CmdInvalidate, cp.State.L1VCaches)
+		expectCtrlStep(toCaches, memcontrolprotocol.CmdEnable, cp.State.L1VCaches)
 
 		rsp := toDriver.RetrieveOutgoing().(protocol.GeneralRsp)
 		Expect(rsp.RspTo).To(Equal(req.ID))
