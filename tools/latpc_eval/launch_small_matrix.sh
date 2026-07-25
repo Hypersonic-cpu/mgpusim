@@ -83,3 +83,4 @@ run_stage mechanisms 900 3600 \
     --jobs "$latpc_mechanism_jobs"
 env GOMEMLIMIT=10GiB python3 tools/latpc_eval/run.py collect
 env GOMEMLIMIT=10GiB python3 tools/latpc_plot/plot.py
+env GOMEMLIMIT=10GiB python3 tools/latpc_eval/report.py
