@@ -858,7 +858,8 @@ def read_metrics(path: Path) -> list[tuple[str, str, float, str]]:
         return [
             (str(location), str(what), float(value), str(unit))
             for location, what, value, unit in database.execute(
-                "SELECT Location, What, Value, Unit FROM mgpusim_metrics"
+                "SELECT Location, What, Value, Unit FROM mgpusim_metrics "
+                "WHERE Value IS NOT NULL"
             )
         ]
 
