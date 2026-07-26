@@ -9,6 +9,7 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/insts"
 	"github.com/sarchlab/mgpusim/v5/amd/kernels"
 	"github.com/sarchlab/mgpusim/v5/amd/protocol"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/wavefront"
 )
 
@@ -708,6 +709,35 @@ var _ = Describe("ComputeUnit", func() {
 			cu.checkShadowBuffers()
 
 			Expect(cu.comp.State.IsPaused).To(BeFalse())
+		})
+
+		It("should preserve vector translation metadata across a restart", func() {
+			latpc.ResetRuntimeMetadata()
+			inst := wavefront.NewInst(insts.NewInst())
+			request := memprotocol.ReadReq{MsgMeta: messaging.MsgMeta{
+				ID: timing.GetIDGenerator().Generate(),
+			}}
+			member := latpc.GroupMember{
+				InstructionID: inst.ID,
+				RequestID:     request.ID,
+				Position:      1,
+				Count:         2,
+			}
+			cu.shadowInFlightVectorMemAccess = []VectorMemAccessInfo{{
+				Read:              &request,
+				Inst:              inst,
+				TranslationMember: &member,
+			}}
+
+			Expect(cu.sendVectorShadowBufferAccesses()).To(BeTrue())
+
+			restartedID := request.ID
+			got, found := latpc.RequestMetadata(restartedID)
+			Expect(found).To(BeTrue())
+			Expect(got.RequestID).To(Equal(restartedID))
+			Expect(got.InstructionID).To(Equal(inst.ID))
+			Expect(got.Position).To(Equal(uint16(1)))
+			Expect(got.Count).To(Equal(uint16(2)))
 		})
 	})
 })

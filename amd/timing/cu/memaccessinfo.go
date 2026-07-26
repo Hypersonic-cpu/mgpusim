@@ -3,6 +3,7 @@ package cu
 import (
 	"github.com/sarchlab/akita/v5/mem/memprotocol"
 	"github.com/sarchlab/mgpusim/v5/amd/insts"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/wavefront"
 )
 
@@ -21,8 +22,11 @@ type VectorMemAccessInfo struct {
 	Write     *memprotocol.WriteReq
 	Wavefront *wavefront.Wavefront
 	Inst      *wavefront.Inst
-	laneInfo  []vectorMemAccessLaneInfo
-	laneMask  uint64
+	// TranslationMember survives a CU pipeline flush, which replaces the
+	// request ID before the vector transaction is sent again.
+	TranslationMember *latpc.GroupMember
+	laneInfo          []vectorMemAccessLaneInfo
+	laneMask          uint64
 }
 
 // InstFetchReqInfo defines request info

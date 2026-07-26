@@ -14,6 +14,7 @@ import (
 	"github.com/sarchlab/mgpusim/v5/amd/kernels"
 	"github.com/sarchlab/mgpusim/v5/amd/protocol"
 	"github.com/sarchlab/mgpusim/v5/amd/sampling"
+	"github.com/sarchlab/mgpusim/v5/amd/timing/latpc"
 	"github.com/sarchlab/mgpusim/v5/amd/timing/wavefront"
 )
 
@@ -1048,6 +1049,7 @@ func (cu *ComputeUnit) sendVectorShadowBufferAccesses() bool {
 		info := cu.shadowInFlightVectorMemAccess[0]
 		if info.Read != nil {
 			info.Read.ID = timing.GetIDGenerator().Generate()
+			cu.registerRestartedVectorTranslation(&info, info.Read.ID)
 			if cu.vectorMemPort().CanSend() {
 				cu.vectorMemPort().Send(*info.Read)
 				tracing.TraceReqInitiate(cu.comp, *info.Read, info.Inst.ID)
@@ -1059,6 +1061,7 @@ func (cu *ComputeUnit) sendVectorShadowBufferAccesses() bool {
 			}
 		} else if info.Write != nil {
 			info.Write.ID = timing.GetIDGenerator().Generate()
+			cu.registerRestartedVectorTranslation(&info, info.Write.ID)
 			if cu.vectorMemPort().CanSend() {
 				cu.vectorMemPort().Send(*info.Write)
 				tracing.TraceReqInitiate(cu.comp, *info.Write, info.Inst.ID)
@@ -1071,6 +1074,19 @@ func (cu *ComputeUnit) sendVectorShadowBufferAccesses() bool {
 		}
 	}
 	return false
+}
+
+func (cu *ComputeUnit) registerRestartedVectorTranslation(
+	info *VectorMemAccessInfo,
+	requestID uint64,
+) {
+	if info.TranslationMember == nil {
+		return
+	}
+	member := *info.TranslationMember
+	member.RequestID = requestID
+	latpc.RegisterRequestMetadata(requestID, member)
+	info.TranslationMember = &member
 }
 
 func (cu *ComputeUnit) sendInstFetchShadowBufferAccesses() bool {

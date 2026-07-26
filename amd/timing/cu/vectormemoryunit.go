@@ -371,8 +371,9 @@ func (u *VectorMemoryUnit) registerTranslationGroup(
 		panic(err)
 	}
 	members = detector.AnnotateGroupMembers(members)
-	for _, member := range members {
+	for i, member := range members {
 		latpc.RegisterRequestMetadata(member.RequestID, member)
+		transactions[i].TranslationMember = &member
 	}
 }
 
