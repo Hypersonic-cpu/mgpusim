@@ -387,12 +387,12 @@ def run_one(
         running = json.loads(running_path.read_text())
         expected = str((BIN / workload.name).resolve())
         pid = int(running["pid"])
-        if running.get("git_commit") != built_from:
-            raise RuntimeError(
-                f"{running_path}: active run uses commit "
-                f"{running.get('git_commit')}, binary uses {built_from}"
-            )
         if process_is_alive(pid):
+            if running.get("git_commit") != built_from:
+                raise RuntimeError(
+                    f"{running_path}: active run uses commit "
+                    f"{running.get('git_commit')}, binary uses {built_from}"
+                )
             command_text = process_command(pid)
             if expected not in command_text:
                 raise RuntimeError(
