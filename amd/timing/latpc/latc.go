@@ -376,30 +376,42 @@ func (m *latcMiddleware) allocateReady() bool {
 	}
 	result := m.detector.Detect(members)
 	m.addInstructionWaiters(&result, instruction)
-	needed := requiredLATCEntries(result)
-	if len(m.reservations)+needed > m.comp.Spec().MSHRSize {
-		if !instruction.blocked {
-			instruction.blocked = true
-			m.stats.ReservationFailures++
-		}
-		return false
-	}
-
-	m.ready = m.ready[1:]
+	progress := false
 	for _, group := range result.Groups {
-		m.stats.GroupsPresented++
 		if group.Regular {
+			if len(m.reservations) == m.comp.Spec().MSHRSize {
+				break
+			}
+			m.stats.GroupsPresented++
 			m.allocateGroup(group, instruction)
+			m.removeAllocatedMembers(instruction, group.Members)
+			progress = true
 			continue
 		}
 		for _, member := range group.Members {
+			if len(m.reservations) == m.comp.Spec().MSHRSize {
+				break
+			}
+			m.stats.GroupsPresented++
 			m.allocateMembers([]TranslationMember{member}, false, instruction)
+			m.removeAllocatedMembers(
+				instruction, []TranslationMember{member})
+			progress = true
 		}
+		if len(m.reservations) == m.comp.Spec().MSHRSize {
+			break
+		}
+	}
+	if len(instruction.members) == 0 {
+		m.ready = m.ready[1:]
+	} else if !instruction.blocked {
+		instruction.blocked = true
+		m.stats.ReservationFailures++
 	}
 	if len(m.reservations) > m.stats.PeakMSHROccupancy {
 		m.stats.PeakMSHROccupancy = len(m.reservations)
 	}
-	return true
+	return progress
 }
 
 func (m *latcMiddleware) addInstructionWaiters(
@@ -419,16 +431,16 @@ func (m *latcMiddleware) addInstructionWaiters(
 	}
 }
 
-func requiredLATCEntries(result DetectionResult) int {
-	needed := 0
-	for _, group := range result.Groups {
-		if group.Regular {
-			needed++
-		} else {
-			needed += len(group.Members)
+func (m *latcMiddleware) removeAllocatedMembers(
+	instruction *latcInstruction,
+	members []TranslationMember,
+) {
+	for _, member := range members {
+		for _, position := range member.Positions {
+			delete(instruction.members, position)
+			delete(instruction.waiters, position)
 		}
 	}
-	return needed
 }
 
 func (m *latcMiddleware) allocateGroup(

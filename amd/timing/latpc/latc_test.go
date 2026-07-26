@@ -238,6 +238,40 @@ func TestLATCReplaysPreFlushAndRestartedRequests(t *testing.T) {
 	}
 }
 
+func TestLATCStreamsAnIrregularGroupPastMSHRCapacity(t *testing.T) {
+	comp, ports := makeLATCTestComponent(t, 1)
+	requests := deliverLATCGroup(t, ports[LATCTopPortName], 10, 20, 24)
+
+	first := collectLATCForwards(comp, ports[LATCBottomPortName], 1)
+	if len(comp.middleware.ready) != 1 ||
+		len(comp.middleware.reservations) != 1 {
+		t.Fatalf("LATC did not retain the capacity-blocked tail")
+	}
+	deliverTranslationResponse(ports[LATCBottomPortName], first[0])
+	comp.Tick()
+
+	second := collectLATCForwards(comp, ports[LATCBottomPortName], 1)
+	deliverTranslationResponse(ports[LATCBottomPortName], second[0])
+	comp.Tick()
+
+	seen := make(map[uint64]bool)
+	for {
+		message := ports[LATCTopPortName].RetrieveOutgoing()
+		if message == nil {
+			break
+		}
+		seen[message.Meta().RspTo] = true
+	}
+	for _, request := range requests {
+		if !seen[request.ID] {
+			t.Fatalf("request %d was not replayed", request.ID)
+		}
+	}
+	if !comp.IsDrained() {
+		t.Fatal("LATC retained the streamed irregular group")
+	}
+}
+
 func TestLATCReservationBackpressureAndReset(t *testing.T) {
 	comp, ports := makeLATCTestComponent(t, 1)
 	deliverLATCGroup(t, ports[LATCTopPortName], 1, 10)
