@@ -190,6 +190,54 @@ func TestLATCHandlesDuplicateVPNAndPartialCompletion(t *testing.T) {
 	}
 }
 
+func TestLATCReplaysPreFlushAndRestartedRequests(t *testing.T) {
+	comp, ports := makeLATCTestComponent(t, 2)
+	makeRequest := func(position uint16) vmprotocol.TranslationReq {
+		req := vmprotocol.TranslationReq{PID: 1, VAddr: uint64(position+20) * 4096}
+		req.ID = timing.GetIDGenerator().Generate()
+		req.Src = "AddressTranslator.Translation"
+		req.Dst = ports[LATCTopPortName].AsRemote()
+		RegisterRequestMetadata(req.ID, GroupMember{
+			InstructionID: 9,
+			RequestID:     req.ID,
+			Position:      position,
+			Count:         2,
+			VAddr:         req.VAddr,
+		})
+		return req
+	}
+
+	preFlush := makeRequest(0)
+	restarted := makeRequest(0)
+	sibling := makeRequest(1)
+	ports[LATCTopPortName].Deliver(preFlush)
+	ports[LATCTopPortName].Deliver(restarted)
+	ports[LATCTopPortName].Deliver(sibling)
+
+	forwards := collectLATCForwards(comp, ports[LATCBottomPortName], 3)
+	for _, forward := range forwards {
+		deliverTranslationResponse(ports[LATCBottomPortName], forward)
+		comp.Tick()
+	}
+
+	seen := make(map[uint64]bool)
+	for {
+		message := ports[LATCTopPortName].RetrieveOutgoing()
+		if message == nil {
+			break
+		}
+		seen[message.Meta().RspTo] = true
+	}
+	for _, req := range []vmprotocol.TranslationReq{preFlush, restarted, sibling} {
+		if !seen[req.ID] {
+			t.Fatalf("request %d was not replayed", req.ID)
+		}
+	}
+	if !comp.IsDrained() {
+		t.Fatal("LATC retained a pre-flush or restarted waiter")
+	}
+}
+
 func TestLATCReservationBackpressureAndReset(t *testing.T) {
 	comp, ports := makeLATCTestComponent(t, 1)
 	deliverLATCGroup(t, ports[LATCTopPortName], 1, 10)

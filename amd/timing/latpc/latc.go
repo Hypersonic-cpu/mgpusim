@@ -90,6 +90,7 @@ type latcRequest struct {
 
 type latcInstruction struct {
 	members  map[uint16]GroupMember
+	waiters  map[uint16][]uint64
 	requests map[uint64]latcRequest
 	count    uint16
 	blocked  bool
@@ -339,12 +340,17 @@ func (m *latcMiddleware) receiveRequest() bool {
 		if instruction == nil {
 			instruction = &latcInstruction{
 				members:  make(map[uint16]GroupMember),
+				waiters:  make(map[uint16][]uint64),
 				requests: make(map[uint64]latcRequest),
 				count:    member.Count,
 			}
 			m.collecting[member.InstructionID] = instruction
 		}
-		instruction.members[member.Position] = member
+		if _, exists := instruction.members[member.Position]; !exists {
+			instruction.members[member.Position] = member
+		}
+		instruction.waiters[member.Position] = append(
+			instruction.waiters[member.Position], req.ID)
 		instruction.requests[req.ID] = latcRequest{
 			original: req, admittedAt: m.comp.CurrentTime(),
 		}
@@ -369,6 +375,7 @@ func (m *latcMiddleware) allocateReady() bool {
 		members = append(members, member)
 	}
 	result := m.detector.Detect(members)
+	m.addInstructionWaiters(&result, instruction)
 	needed := requiredLATCEntries(result)
 	if len(m.reservations)+needed > m.comp.Spec().MSHRSize {
 		if !instruction.blocked {
@@ -393,6 +400,23 @@ func (m *latcMiddleware) allocateReady() bool {
 		m.stats.PeakMSHROccupancy = len(m.reservations)
 	}
 	return true
+}
+
+func (m *latcMiddleware) addInstructionWaiters(
+	result *DetectionResult,
+	instruction *latcInstruction,
+) {
+	for groupIndex := range result.Groups {
+		group := &result.Groups[groupIndex]
+		for memberIndex := range group.Members {
+			member := &group.Members[memberIndex]
+			member.Waiters = nil
+			for _, position := range member.Positions {
+				member.Waiters = append(
+					member.Waiters, instruction.waiters[position]...)
+			}
+		}
+	}
 }
 
 func requiredLATCEntries(result DetectionResult) int {
