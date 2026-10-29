@@ -1,6 +1,12 @@
 #!/bin/sh
-# Launch the staged five-workload LATPC Small-input timing matrix.
+# Launch the staged five-workload LATPC Small-input timing matrix, or rerun the
+# remaining temporarily excluded workloads serially with freshly built binaries.
 set -eu
+
+latpc_action=${1:-matrix}
+if [ "$latpc_action" = "recovery" ]; then
+    shift
+fi
 
 latpc_baseline_jobs=${1:-6}
 latpc_mechanism_jobs=${2:-5}
@@ -69,6 +75,46 @@ if failures:
     raise SystemExit("baseline failure; mechanisms were not launched:\n" + "\n".join(failures))
 PY
 }
+
+run_recovery_workload() {
+    latpc_name=$1
+    latpc_package=$2
+    shift 2
+
+    latpc_binary="out/latpc/evaluation/bin/$latpc_name"
+    latpc_recovery_dir="out/latpc/evaluation/recovery/$latpc_name"
+    mkdir -p "$latpc_recovery_dir"
+
+    env GOMEMLIMIT=10GiB go build -o "$latpc_binary" "$latpc_package"
+    env GOMEMLIMIT=10GiB "$latpc_binary" \
+        -timing -arch=cdna3 -gpu=mi300x \
+        -translation-mode=baseline -translation-profile=large-resource \
+        -verify -report-all -disable-rtm \
+        "-metric-file-name=$latpc_recovery_dir/metrics" \
+        "$@" >"$latpc_recovery_dir/stdout.log" 2>"$latpc_recovery_dir/stderr.log"
+}
+
+if [ "$latpc_action" = "recovery" ]; then
+    if [ "$#" -ne 0 ]; then
+        echo "usage: $0 recovery" >&2
+        exit 2
+    fi
+
+    # FDTD2D is omitted: every requested 64--128 input crosses multiple work
+    # groups and fails the known cache-coherence check. Deliberately serial:
+    # the next workload starts only after the previous run verifies.
+    run_recovery_workload pagerank ./amd/samples/pagerank \
+        -node=32768 -sparsity=0.000579833984375 -iterations=16
+    run_recovery_workload lud ./amd/samples/rodinia_lud -size=1024
+    run_recovery_workload spmv ./amd/samples/spmv \
+        -dim=32768 -sparsity=0.000579833984375
+    exit 0
+fi
+
+if [ "$latpc_action" != "matrix" ]; then
+    echo "usage: $0 [matrix [baseline-jobs [mechanism-jobs]] | recovery]" >&2
+    exit 2
+fi
 
 run_stage resolve_baseline 900 3600 \
     env GOMEMLIMIT=10GiB python3 tools/latpc_eval/run.py resolve \

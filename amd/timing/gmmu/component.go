@@ -457,7 +457,9 @@ func (m *componentMiddleware) completeDrain() bool {
 		!m.comp.Core.IsDrained() ||
 		len(m.pendingMemory) != 0 ||
 		len(m.memoryRequestIDs) != 0 ||
-		len(m.pendingResponses) != 0 {
+		len(m.pendingResponses) != 0 ||
+		len(m.pendingFaults) != 0 ||
+		len(m.topRequests) != 0 {
 		return false
 	}
 	if !m.controlPort().CanSend() {

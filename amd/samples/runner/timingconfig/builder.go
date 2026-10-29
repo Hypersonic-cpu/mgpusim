@@ -177,7 +177,8 @@ func (b *Builder) createGMMU() (*detailedgmmu.Comp, *mgpuvm.RadixPageTable) {
 	walkerConfig.Format = format
 	walkerConfig.PWQEntries = b.translationConfig.Resources.PWQEntries
 	walkerConfig.NumWalkers = b.translationConfig.Resources.Walkers
-	walkerConfig.PWCEntries = b.translationConfig.Resources.PWCEntries[0]
+	walkerConfig.PWCEntries = append(
+		[]int(nil), b.translationConfig.Resources.PWCEntries...)
 	walkerConfig.TranslationMode = b.translationConfig.Mode
 	mmuComponent := detailedgmmu.MakeBuilder().
 		WithRegistrar(b.simulation).

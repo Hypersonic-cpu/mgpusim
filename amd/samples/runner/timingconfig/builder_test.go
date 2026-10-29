@@ -1,6 +1,7 @@
 package timingconfig
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/sarchlab/akita/v5/mem/cache/writethroughcache"
@@ -82,7 +83,7 @@ func TestTranslationSelectionReachesBuiltResources(t *testing.T) {
 	if gmmuComp.Core.Config.TranslationMode != latpc.ModeLATPC ||
 		gmmuComp.Core.Config.PWQEntries != 256 ||
 		gmmuComp.Core.Config.NumWalkers != 32 ||
-		gmmuComp.Core.Config.PWCEntries != 32 {
+		!reflect.DeepEqual(gmmuComp.Core.Config.PWCEntries, []int{32, 32, 32}) {
 		t.Fatalf("unexpected GMMU config: %+v", gmmuComp.Core.Config)
 	}
 

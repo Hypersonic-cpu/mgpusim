@@ -69,5 +69,7 @@ out/latpc/baseline/
 out/latpc/evaluation/
 out/latpc/opportunity/
 
+sim_out/
+
 # hipcc linker intermediate
 *.resolution.txt

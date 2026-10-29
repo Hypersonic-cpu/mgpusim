@@ -7,7 +7,7 @@ import (
 
 func TestFourLevelFormatIndices(t *testing.T) {
 	format := X86FourLevel4KFormat()
-	vAddr := uint64(0x0000_ff92_3456_7abc)
+	vAddr := uint64(0x0000_7f92_3456_7abc)
 
 	indices, err := format.ExtractIndices(vAddr)
 	if err != nil {
@@ -22,6 +22,27 @@ func TestFourLevelFormatIndices(t *testing.T) {
 	}
 	if indices != expected {
 		t.Fatalf("indices: got %v, want %v", indices, expected)
+	}
+}
+
+func TestFourLevelFormatRejectsNonCanonicalHighAddresses(t *testing.T) {
+	format := X86FourLevel4KFormat()
+	for _, vAddr := range []uint64{
+		uint64(1)<<47 - 1,
+		uint64(1) << 47,
+		uint64(1)<<48 | 0x1234,
+		uint64(1)<<63 | 0x1234,
+	} {
+		_, err := format.ExtractIndices(vAddr)
+		if vAddr < uint64(1)<<47 {
+			if err != nil {
+				t.Fatalf("valid address 0x%x: %v", vAddr, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrUnsupportedVirtualAddress) {
+			t.Fatalf("address 0x%x: got %v, want unsupported-address error", vAddr, err)
+		}
 	}
 }
 

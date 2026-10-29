@@ -16,6 +16,9 @@ var (
 	ErrInvalidPageTableLevel = errors.New("invalid page-table level")
 	// ErrPageTableIndexOutOfRange indicates an index wider than its level.
 	ErrPageTableIndexOutOfRange = errors.New("page-table index out of range")
+	// ErrUnsupportedVirtualAddress indicates an address outside the lower
+	// canonical range implemented by the detailed page-table walker.
+	ErrUnsupportedVirtualAddress = errors.New("unsupported virtual address")
 )
 
 // PageTableFormat describes a radix page table from root to leaf.
@@ -117,6 +120,9 @@ func (f PageTableFormat) ExtractIndices(
 	var indices [MaxPageTableLevels]uint64
 	if err := f.Validate(); err != nil {
 		return indices, err
+	}
+	if f.NumLevels == 4 && vAddr >= uint64(1)<<47 {
+		return indices, fmt.Errorf("%w: 0x%x", ErrUnsupportedVirtualAddress, vAddr)
 	}
 
 	shift := uint64(f.PageOffsetBits)

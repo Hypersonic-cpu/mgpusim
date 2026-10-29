@@ -31,6 +31,10 @@ func makeCore(
 	}
 	config := DefaultConfig()
 	config.Format = format
+	config.PWCEntries = make([]int, int(format.NumLevels)-1)
+	for level := range config.PWCEntries {
+		config.PWCEntries[level] = DefaultPWCEntries
+	}
 	if configure != nil {
 		configure(&config)
 	}
@@ -70,13 +74,19 @@ func finishCore(t *testing.T, core *Core) {
 	for {
 		reads := core.DrainMemoryReads()
 		if len(reads) == 0 {
-			if core.IsDrained() {
+			if coreWalksDrained(core) {
 				return
 			}
 			t.Fatal("core has work but no memory request")
 		}
 		completeReads(t, core, reads)
 	}
+}
+
+func coreWalksDrained(core *Core) bool {
+	return len(core.pwq) == 0 && core.busyWalkers() == 0 &&
+		len(core.reqToWalker) == 0 && len(core.submittedAt) == 0 &&
+		len(core.memoryIssued) == 0
 }
 
 func TestColdFourLevelWalkReadsEveryLevel(t *testing.T) {
@@ -339,7 +349,7 @@ func TestOutOfOrderResponsesAdvanceOwningWalkers(t *testing.T) {
 		t.Fatalf("submit PID 2: %v", err)
 	}
 
-	for !core.IsDrained() {
+	for !coreWalksDrained(core) {
 		reads := core.DrainMemoryReads()
 		for index := len(reads) - 1; index >= 0; index-- {
 			completeReads(t, core, []MemoryRead{reads[index]})

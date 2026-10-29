@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 
 	akitavm "github.com/sarchlab/akita/v5/mem/vm"
 	"github.com/sarchlab/akita/v5/timing"
@@ -153,7 +154,7 @@ type Config struct {
 	Format          mgpuvm.PageTableFormat
 	PWQEntries      int
 	NumWalkers      int
-	PWCEntries      int
+	PWCEntries      []int
 	TranslationMode latpc.Mode
 }
 
@@ -163,7 +164,7 @@ func DefaultConfig() Config {
 		Format:          mgpuvm.X86FourLevel4KFormat(),
 		PWQEntries:      DefaultPWQEntries,
 		NumWalkers:      DefaultNumWalkers,
-		PWCEntries:      DefaultPWCEntries,
+		PWCEntries:      []int{DefaultPWCEntries, DefaultPWCEntries, DefaultPWCEntries},
 		TranslationMode: latpc.ModeBaseline,
 	}
 }
@@ -226,8 +227,16 @@ func NewCore(config Config, table *mgpuvm.RadixPageTable) (*Core, error) {
 	if table == nil {
 		return nil, fmt.Errorf("gmmu: nil radix page table")
 	}
-	if config.PWQEntries <= 0 || config.NumWalkers <= 0 || config.PWCEntries <= 0 {
+	if config.PWQEntries <= 0 || config.NumWalkers <= 0 {
 		return nil, fmt.Errorf("gmmu: capacities must be positive")
+	}
+	if len(config.PWCEntries) != int(config.Format.NumLevels)-1 {
+		return nil, fmt.Errorf("gmmu: PWCEntries has %d entries, want %d", len(config.PWCEntries), config.Format.NumLevels-1)
+	}
+	for level, entries := range config.PWCEntries {
+		if entries <= 0 {
+			return nil, fmt.Errorf("gmmu: PWCEntries[%d] must be positive", level)
+		}
 	}
 	if table.Format != config.Format {
 		return nil, fmt.Errorf("gmmu: page-table format mismatch")
@@ -244,7 +253,7 @@ func NewCore(config Config, table *mgpuvm.RadixPageTable) (*Core, error) {
 		nextMemoryID: 1,
 	}
 	for level := range core.pwcs {
-		core.pwcs[level] = newPageWalkCache(config.PWCEntries)
+		core.pwcs[level] = newPageWalkCache(config.PWCEntries[level])
 	}
 	return core, nil
 }
@@ -460,7 +469,10 @@ func (c *Core) Drain() {
 
 // IsDrained reports whether all accepted work has completed.
 func (c *Core) IsDrained() bool {
-	return len(c.pwq) == 0 && c.busyWalkers() == 0 && len(c.reqToWalker) == 0
+	return len(c.pwq) == 0 && c.busyWalkers() == 0 &&
+		len(c.reqToWalker) == 0 && len(c.submittedAt) == 0 &&
+		len(c.memoryIssued) == 0 && len(c.outgoing) == 0 &&
+		len(c.completed) == 0 && len(c.faults) == 0
 }
 
 // Reset discards all runtime work and invalidates every PWC.
@@ -568,23 +580,13 @@ func (c *Core) takeNextWalkGroup() ([]WalkRequest, bool) {
 
 func (c *Core) startWalker(walkerIndex int, requests []WalkRequest) {
 	req := requests[0]
-	indices, err := c.Config.Format.ExtractIndices(req.VAddr)
+	indices, addressSpace, err := c.validateWalkGroup(requests)
 	if err != nil {
-		c.faults = append(c.faults, TranslationFaultError{
-			RequestID: req.ID, PID: req.PID, VAddr: req.VAddr, Reason: err.Error(),
-		})
-		c.Stats.Faults++
-		return
-	}
-	addressSpace, ok := c.Table.AddressSpace(req.PID)
-	if !ok {
-		c.faults = append(c.faults, TranslationFaultError{
-			RequestID: req.ID,
-			PID:       req.PID,
-			VAddr:     req.VAddr,
-			Reason:    mgpuvm.ErrAddressSpaceNotFound.Error(),
-		})
-		c.Stats.Faults++
+		for _, member := range requests {
+			delete(c.submittedAt, member.ID)
+			c.appendFault(member, 0, err.Error())
+		}
+		c.dispatch()
 		return
 	}
 
@@ -617,6 +619,40 @@ func (c *Core) startWalker(walkerIndex int, requests []WalkRequest) {
 		"start req=%d walker=%d pid=%d va=0x%x root=0x%x",
 		req.ID, walkerIndex, req.PID, req.VAddr, addressSpace.RootPAddr)
 	c.advanceWalker(walkerIndex)
+}
+
+func (c *Core) validateWalkGroup(
+	requests []WalkRequest,
+) ([mgpuvm.MaxPageTableLevels]uint64, mgpuvm.AddressSpace, error) {
+	var firstIndices [mgpuvm.MaxPageTableLevels]uint64
+	if len(requests) == 0 {
+		return firstIndices, mgpuvm.AddressSpace{}, errors.New("empty walk group")
+	}
+	first := requests[0]
+	indices, err := c.Config.Format.ExtractIndices(first.VAddr)
+	if err != nil {
+		return firstIndices, mgpuvm.AddressSpace{}, err
+	}
+	firstIndices = indices
+	addressSpace, ok := c.Table.AddressSpace(first.PID)
+	if !ok {
+		return firstIndices, mgpuvm.AddressSpace{}, mgpuvm.ErrAddressSpaceNotFound
+	}
+	for _, member := range requests {
+		memberIndices, memberErr := c.Config.Format.ExtractIndices(member.VAddr)
+		if memberErr != nil {
+			return firstIndices, mgpuvm.AddressSpace{}, memberErr
+		}
+		if member.PID != first.PID {
+			return firstIndices, mgpuvm.AddressSpace{}, fmt.Errorf("group PID mismatch: request=%d pid=%d want=%d", member.ID, member.PID, first.PID)
+		}
+		for level := uint8(0); level+1 < c.Config.Format.NumLevels; level++ {
+			if memberIndices[level] != firstIndices[level] {
+				return firstIndices, mgpuvm.AddressSpace{}, fmt.Errorf("group upper-page-table path mismatch: request=%d va=0x%x", member.ID, member.VAddr)
+			}
+		}
+	}
+	return firstIndices, addressSpace, nil
 }
 
 func (c *Core) advanceWalker(walkerIndex int) {
@@ -854,6 +890,15 @@ func (c *Core) appendTranslation(
 	physicalBase uint64,
 	reads uint64,
 ) {
+	if os.Getenv("MGPUSIM_PTW_ASSERT") == "1" {
+		expected, err := c.Table.Walk(req.PID, req.VAddr)
+		if err != nil || expected.PhysicalBase != physicalBase {
+			panic(fmt.Sprintf(
+				"PTW oracle mismatch: req=%d pid=%d va=0x%x walker-pa=0x%x expected-pa=0x%x err=%v",
+				req.ID, req.PID, req.VAddr, physicalBase,
+				expected.PhysicalBase, err))
+		}
+	}
 	pageSize := uint64(1) << c.Config.Format.PageOffsetBits
 	page, ok := c.Table.MappingMetadata(req.PID, req.VAddr)
 	if !ok {
